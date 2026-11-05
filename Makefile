@@ -832,6 +832,7 @@ ci-skipped: ## What `make ci` did not run here, and why
 	  *)    echo "── skipped: ci-kind, evals-live-kind, e2e-live, load-smoke (needs a cluster; make ci ENV=kind)" ;; \
 	esac
 	@echo "── skipped: ci-compose (three services and minutes; make ci-compose)"
+	@echo "── skipped: image-scan (builds the image; make image-scan)"
 	@echo "── skipped: license-scan (advisory, not a merge gate; make license-scan)"
 	@echo "── skipped: test-skills (grades real model output; make test-skills)"
 	@echo "── skipped: test-nightly (needs a running stack; make test-nightly)"

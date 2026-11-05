@@ -639,8 +639,15 @@ class Harness:
             )
             .as_service()
         )
+        # The datastores are bound to the *agent*, not to this
+        # container. These tests talk to a running agent over HTTP and
+        # never to Postgres directly — and handing them a reachable
+        # one is actively harmful: `agent.aegra.shutdown` registers an
+        # atexit handler that closes the pool, and at interpreter
+        # shutdown that raises `RuntimeError: Event loop is closed`
+        # and pytest exits 3 having run every test successfully.
         out: str = await (
-            self.datastores(self.base(source))
+            self.base(source)
             .with_service_binding("agent", agent)
             .with_env_variable("LANGGRAPH_API_URL", "http://agent:5002")
             .with_env_variable("AGENT_BASE_URL", "http://agent:5002")
@@ -693,7 +700,15 @@ class Harness:
             ("e2e", self.e2e(source)),
             ("pre_commit", self.pre_commit(source)),
             ("gitleaks", self.gitleaks(source)),
-            ("image_scan", self.image_scan(source)),
+            # `image_scan` is out for the same reason as
+            # `compose_tier`, only sharper: it builds the whole
+            # runtime image and exports it as a tarball, which is the
+            # image twice on disk. On a runner with 14 GB that filled
+            # the engine's snapshot store and took nine *other*
+            # checks down with it — `no space left on device`
+            # reported as a failing config validator. It has its own
+            # job in `build-base-image.yml`, which is where the image
+            # is built anyway.
             # `license_scan` is deliberately absent: `required-checks.yml`
             # calls it advisory — "a conversation rather than a build
             # failure" — and a function in this list is a blocking one.

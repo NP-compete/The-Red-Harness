@@ -51,6 +51,18 @@ jobs:
       # Redis and agent. There is one definition and one container,
       # so this runs the identical command a developer runs — not an
       # equivalent list, and not a shell script that drifted from one.
+      # Not a check — runner housekeeping, and it earns its place.
+      # The engine keeps a snapshot per layer, and twenty pipelines
+      # over a tree with spaCy's `en_core_web_lg` in it will fill
+      # 14 GB. When it does, the failure is not "out of disk": it is
+      # nine checks reporting as broken, which is a bad hour.
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          docker image prune --all --force
+          df -h /
+
       - name: Install Dagger
         run: make dagger-install
 
