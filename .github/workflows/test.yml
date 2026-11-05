@@ -90,7 +90,16 @@ jobs:
   compose-tier:
     name: Integration (compose)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Sixty, not thirty, and the reason matters more than the number.
+    # This job reported success for months without running anything:
+    # `ci-compose` probed the agent's health endpoint and printed
+    # "skipped: no agent at …" when it could not reach one, exiting
+    # 0. The agent could never start — `MCP_TOKEN_ENCRYPTION_KEY` was
+    # not set — so the probe always failed and the tier always
+    # skipped. These ninety-one tests have not run in CI before now.
+    # They do, and they are slow; `--durations` in the function says
+    # which ones.
+    timeout-minutes: 60
 
     # No `services:` block any more, and no `aegra dev &` followed by
     # a `for _ in $(seq 1 60)` health poll. `compose_tier` binds its

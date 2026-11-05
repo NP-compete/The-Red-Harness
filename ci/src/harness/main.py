@@ -746,6 +746,9 @@ class Harness:
                     # hour and forty minutes the first time.
                     "--timeout=180",
                     "--timeout-method=thread",
+                    # Which of the ninety-one are the slow ones. They
+                    # have never run in CI before, so nobody knows.
+                    "--durations=20",
                 ]
             )
             .stdout()
