@@ -1,0 +1,104 @@
+# Capabilities that are off until somebody turns them on.
+#
+# Declared once, here, rather than as a boolean read in whichever
+# module happens to need it. Ten flags read in ten places is ten
+# chances to read the same one twice with different defaults, and the
+# first time that happens it is a bug nobody can see.
+#
+# Each declaration says four things:
+#
+#   scope       the narrowest level that may set this at all —
+#               deployment, agent, or user. A level narrower than
+#               the one named here has no say either way: it is not
+#               that person's switch to throw, and a half-thrown
+#               switch would be a third state. Asking anyway is
+#               recorded as overruled, so a surface can say why the
+#               switch it offered did nothing.
+#
+#               Within the levels that may set it, widest wins on a
+#               refusal: a narrower level may turn something off but
+#               never on against a wider no. "Forbidden" means a
+#               wider level said no — not that nobody mentioned it.
+#   default     what it is when nobody has said. Always off, because
+#               opt-in means off for a deployment that never read
+#               this file.
+#   ui_exposed  whether it is offered as a switch at all.
+#   cost        what turning it on costs, in words. A switch with no
+#               stated cost is a switch somebody flips to find out.
+#
+# `requires` names flags that must already be on. A toggle that
+# switches on a capability whose preconditions are absent produces a
+# half-built path, so it refuses and says which precondition is
+# missing instead.
+#
+# One capability deliberately has no flag here: authorization. A
+# switch that disables an authorization check is the vulnerability
+# the check exists to prevent. It is configured at deploy time and
+# ships on.
+#
+# Boolean flags only. A setting that chooses among several values —
+# which execution backend, how many peers — is a configured value
+# rather than a capability, because "a narrower scope may only
+# narrow" has no meaning for an enum. Those live in their own
+# sections of agent.yaml.
+
+features:
+  planner_enabled:
+    epic: E14
+    scope: agent
+    default: false
+    ui_exposed: true
+    cost: "Adds a planning model call to every request"
+
+  swarm_enabled:
+    epic: E15
+    scope: deployment
+    default: false
+    ui_exposed: true
+    cost: "Runs peer agents concurrently; multiplies model spend per request"
+
+  sandbox_backend:
+    epic: E21
+    scope: deployment
+    default: false
+    ui_exposed: true
+    cost: "Runs an isolated execution environment alongside the agent"
+
+  browser_automation_enabled:
+    epic: E16
+    scope: deployment
+    default: false
+    ui_exposed: true
+    # Without the sandbox this renders attacker-controlled content in
+    # the same place everything else runs.
+    requires:
+      - sandbox_backend
+    cost: "Renders pages the agent did not write; needs the sandbox"
+
+  event_service_enabled:
+    epic: E18
+    scope: deployment
+    default: false
+    ui_exposed: true
+    cost: "Adds a durable execution service between ingress and the run"
+
+  reasoning_profiles_enabled:
+    epic: E17
+    scope: user
+    default: false
+    ui_exposed: true
+    cost: "Longer, more expensive answers when a deeper profile is chosen"
+
+  eval_modules_enabled:
+    epic: E22
+    scope: agent
+    default: false
+    ui_exposed: true
+    cost: "Scores each answer after it is written; adds a model call"
+
+  extraction_ocr_enabled:
+    epic: E20
+    scope: agent
+    default: false
+    ui_exposed: true
+    cost: "Sends uploaded pages to an OCR engine; slower and billed per page"

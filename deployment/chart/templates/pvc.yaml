@@ -1,0 +1,44 @@
+{{- if .Values.components.documentsPvc }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.app.name }}-documents-pvc
+  labels:
+    {{- include "agent.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    # Every replica mounts this claim. Under ReadWriteOnce only the
+    # pods that land on the node holding the volume can attach and the
+    # rest stay Pending with a Multi-Attach error, which on a
+    # multi-node cluster is most of them. Needs a storage class that
+    # supports it — on OpenShift usually a file-based one, not the
+    # default block class.
+    - {{ .Values.storage.documents.accessMode }}
+  {{- with .Values.storage.documents.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.documents.size }}
+{{- end }}
+{{- if .Values.components.configPvc }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: config-pvc
+  labels:
+    {{- include "agent.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    # Shared with the UI by subPath. An RWO claim mounted by both pins
+    # them to one node, which is free on a single-node cluster and a
+    # deliberate choice anywhere else.
+    - {{ .Values.storage.config.accessMode }}
+  {{- with .Values.storage.config.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.config.size }}
+{{- end }}

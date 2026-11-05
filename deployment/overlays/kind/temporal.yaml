@@ -1,0 +1,87 @@
+# Temporal for the Kind environment (E18-T2).
+#
+# **Against the Postgres that is already here.** Temporal needs a
+# database; this cluster runs one. A second Postgres would be a
+# second thing to back up, upgrade and run out of disk, for a
+# development environment that already has the first. `auto-setup`
+# creates the two schemas it needs on first boot and is idempotent
+# after that.
+#
+# **Not in `base/`.** This is the Kind overlay only. Preprod and prod
+# get Temporal through the chart, rendered from `values.yaml` per
+# CI-10, and putting it in `base/` would start a server in every
+# deployment including the ones that set `event_service_enabled`
+# false — which E18-T11 says must attempt no connection at all.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal
+  namespace: template-agent
+spec:
+  selector:
+    app: temporal
+  ports:
+    - name: grpc
+      port: 7233
+      targetPort: 7233
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: temporal
+  namespace: template-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: temporal
+  template:
+    metadata:
+      labels:
+        app: temporal
+    spec:
+      containers:
+        - name: temporal
+          image: temporalio/auto-setup:1.29.0
+          env:
+            - name: DB
+              value: postgres12
+            - name: DB_PORT
+              value: "5432"
+            - name: POSTGRES_SEEDS
+              value: postgres
+            - name: POSTGRES_USER
+              value: postgres
+            - name: POSTGRES_PWD
+              value: postgres
+            # Its own databases beside the agent's, not inside it.
+            - name: DBNAME
+              value: temporal
+            - name: VISIBILITY_DBNAME
+              value: temporal_visibility
+            # Single-node dev topology: all four services in one
+            # process. Production splits them; Kind should not pay
+            # four pods to prove a workflow resumes.
+            - name: SERVICES
+              value: "history,matching,frontend,worker"
+            - name: SKIP_DEFAULT_NAMESPACE_CREATION
+              value: "false"
+            - name: DEFAULT_NAMESPACE
+              value: default
+            - name: DEFAULT_NAMESPACE_RETENTION
+              value: "72h"
+          ports:
+            - containerPort: 7233
+          readinessProbe:
+            tcpSocket:
+              port: 7233
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            failureThreshold: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi

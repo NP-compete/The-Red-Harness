@@ -1,0 +1,23 @@
+# Kind-only: the shutdown budget, matched to this overlay's grace.
+#
+# `drain-patch.yaml` cuts `terminationGracePeriodSeconds` from 600
+# to 60 here, because waiting ten minutes to retire a pod on a
+# laptop is ten minutes of nothing. The base `agent-tuning`
+# ConfigMap carries 585 — 600 grace minus the 15-second preStop —
+# which is what a production pod has and not what this one does.
+#
+# `shutdown.py` warns when its drain plus telemetry flush leaves no
+# headroom before SIGKILL, and that warning is only worth anything
+# if the number it compares against is the pod's own. 60 − 15 = 45.
+#
+# The pair is checked rather than remembered:
+# `tests/unit/deployment/test_the_drain_fits_in_the_grace.py`
+# asserts this value equals the rendered grace minus the rendered
+# preStop sleep, per overlay, so changing one and not the other
+# fails instead of drifting.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agent-tuning
+data:
+  SHUTDOWN_GRACE_PERIOD_SECONDS: "45"

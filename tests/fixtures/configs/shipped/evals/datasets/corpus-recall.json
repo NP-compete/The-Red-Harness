@@ -1,0 +1,12 @@
+{
+  "cases": [
+    {
+      "query": "replay job",
+      "relevant": ["corpus:runbook.md"]
+    },
+    {
+      "query": "ERR-4021",
+      "relevant": ["corpus:expenses.md"]
+    }
+  ]
+}

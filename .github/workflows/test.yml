@@ -1,0 +1,178 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, deep-agent ]
+  pull_request:
+    branches: [ main, deep-agent ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Four checks this repository already had as Makefile targets and
+  # the pipeline never ran: a drifted deployment overlay, a broken
+  # OpenAPI contract, a configuration tree the models would refuse
+  # and a manifest failing its OpenShift constraints all merged
+  # green. Each is `make <target>` and nothing else, so the list a
+  # developer runs with `make ci` and the list CI runs are the same
+  # list (E26-T2).
+  #
+  # Separate from the unit suite because they are seconds, not
+  # minutes: a contract break should not wait behind coverage
+  # instrumentation to be reported.
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # Fifteen `make <target>` steps and a separate unit-test job
+      # used to live here, kept in step with `make ci` by two tests.
+      # The checks are Dagger functions in `ci/` now, so there is one
+      # definition and one container — this runs the identical
+      # command a developer runs, not an equivalent list.
+      - name: Install Dagger
+        run: make dagger-install
+
+      - name: Run the checks
+        run: make ci
+
+  compose-tier:
+    name: Integration (compose)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # The datastores the unit suite deliberately does without.
+    # Declared here rather than started in a step: a service the
+    # job declares is one the runner waits for and tears down.
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: template_agent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        persist-credentials: false
+
+    - name: Setup Python with uv
+      uses: ./.github/actions/setup-python-uv
+      with:
+        python-version: "3.14"
+
+    # The tier talks to a running agent, so one is started here.
+    # `make ci-compose` reports it as skipped — by name — when the
+    # agent is not reachable, which is the honest answer and not a
+    # pass; this job exists so the answer is not "skipped" forever.
+    - name: Start the agent
+      run: |
+        source .venv/bin/activate
+        POSTGRES_HOST=localhost POSTGRES_DB=template_agent \
+          POSTGRES_USER=postgres POSTGRES_PASSWORD=postgres \
+          REDIS_URL=redis://localhost:6379/0 \
+          python .venv/bin/aegra dev --port 5002 --no-db-check &
+        for _ in $(seq 1 60); do curl -sf http://127.0.0.1:5002/health && break; sleep 2; done
+
+    - name: Integration tier
+      run: make ci-compose LANGGRAPH_API_URL=http://127.0.0.1:5002
+
+  kind-tier:
+    name: Cluster (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # Deployment-affecting paths only. A cluster is minutes; running
+    # one for a change to a docstring is how a pipeline becomes
+    # something people wait for rather than something that tells
+    # them anything. The e2e tier runs on every merge regardless —
+    # see `required-checks.yml`.
+    if: >-
+      github.event_name == 'push' ||
+      contains(github.event.pull_request.labels.*.name, 'deployment')
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        persist-credentials: false
+
+    - name: Setup Python with uv
+      uses: ./.github/actions/setup-python-uv
+      with:
+        python-version: "3.14"
+
+    # Installed rather than taken from a third-party action, and
+    # the reason is worth stating: this file was written without
+    # network access, so a `uses:` line here would carry a commit
+    # SHA nobody had verified — which looks exactly like a pinned
+    # action and is not one. A version in a URL is a claim
+    # somebody can check.
+    #
+    # TODO: add the release checksum. It needs a network to
+    # obtain, and an unverified download is the remaining gap in
+    # this job (E26-T8).
+    - name: Install kind
+      run: |
+        curl -fsSLo /usr/local/bin/kind \
+          https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64
+        chmod +x /usr/local/bin/kind
+
+    - name: Create the cluster
+      run: kind create cluster --name template-agent --wait 120s
+
+    # One image, both roles (E10 strand D). The context is the
+    # directory above both checkouts, so the interface has to be
+    # beside the agent — which it is once this repository holds
+    # both (E10 strand B).
+    - name: Build and load the image
+      run: |
+        cd .. && podman build -f template-agent/Containerfile --target runtime -t harness:local .
+        podman save harness:local -o /tmp/harness.tar
+        kind load image-archive /tmp/harness.tar --name template-agent
+
+    - name: Deploy
+      run: |
+        kubectl create namespace template-agent
+        kubectl apply -k deployment/overlays/kind/
+        make kind-seed-config
+        kubectl -n template-agent rollout status deployment/agent --timeout=300s
+        kubectl -n template-agent rollout status deployment/ui --timeout=300s
+
+    - name: Cluster tier
+      run: make ci-kind
+
+    # What the cluster said, when it said no. A failed cluster job
+    # whose logs are gone is a job people disable.
+    - name: What the cluster was doing
+      if: failure()
+      run: |
+        kubectl -n template-agent get pods -o wide
+        kubectl -n template-agent describe pods
+        kubectl -n template-agent logs -l component=agent --tail=100 || true
+        kubectl -n template-agent logs -l component=ui --tail=100 || true

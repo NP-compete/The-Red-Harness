@@ -1,0 +1,58 @@
+# Kind-only: stop waiting ten minutes to retire a pod (E27-T7).
+#
+# `values.yaml` sets a 600-second grace period, and it is right to:
+# a turn can run for minutes, and killing its pod loses the work.
+# On a laptop cluster it is ten minutes of waiting for pods that
+# are serving nobody.
+#
+# It was 30, with a comment claiming that was "past the 15-second
+# drain with room to spare". It was not. **The kubelet starts the
+# grace clock before `preStop`**, so the 15-second preStop sleep
+# comes out of the same budget: 15 + 15 = 30 exactly, no room at
+# all, and everything after the drain — persisting in-flight runs,
+# closing Redis and Postgres — raced a SIGKILL.
+#
+# 60 leaves 45 seconds after preStop for a shutdown that needs 25
+# (15s drain + 5s langfuse + headroom), and is still a tenth of
+# production's. `tests/unit/deployment/test_the_drain_fits_in_the_
+# grace.py` does that arithmetic against the shutdown module's own
+# constants, so changing either side fails rather than drifts.
+#
+# It was not, however, what made `make kind-sync` slow. That was
+# measured rather than assumed, and the first guess was wrong:
+# with the grace period cut from 600s to 30s the sync went from
+# 163s to 172s. The cost is below.
+#
+# One replica, for the same reason. `maxUnavailable: 0` makes a
+# rollout strictly sequential, and the agent takes ~55s from
+# scheduled to ready, so two replicas is two startups: 165s of a
+# 172s sync, measured. A single-node laptop cluster gains nothing
+# from the second copy — and while both existed, a rollout left a
+# mixed fleet where one pod served an edited configuration and the
+# other did not, which reads as the editor being broken.
+#
+# The OpenShift overlay carries neither patch: it keeps 600 and
+# its own replica count.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+spec:
+  # One, for the development loop: two replicas is two
+  # sequential pod startups and doubles `make kind-sync`.
+  #
+  # The nightly crash-recovery tier needs two — killing the
+  # only pod takes the Service with it, and every assertion
+  # after the kill then fails like a recovery bug. Scale up
+  # for that run and back afterwards:
+  #
+  #   kubectl -n template-agent scale deploy/agent --replicas=2
+  #   AGENT_REPLICAS=2 WORKER_KILL_COMMAND=... make test-nightly
+  #   kubectl -n template-agent scale deploy/agent --replicas=1
+  #
+  # Verified that way on 2026-10-31: the run survived its
+  # worker being deleted and finished `success`.
+  replicas: 1
+  template:
+    spec:
+      terminationGracePeriodSeconds: 60

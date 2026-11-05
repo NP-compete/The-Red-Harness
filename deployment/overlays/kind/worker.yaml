@@ -1,0 +1,67 @@
+# The Temporal worker, as its own Deployment (E18-T3).
+#
+# **The same image and tag as the agent.** That is the whole reason
+# this is a role rather than a second artifact: a worker running
+# different code from the agent whose API it calls is a class of bug
+# nobody finds quickly.
+#
+# **It carries no probe that lies.** A worker serves no HTTP, so a
+# readiness probe would have to invent something to check. With
+# `event_service_enabled` off the process logs why and exits zero —
+# which Kubernetes treats as Completed and restarts under the
+# default policy, so the flag being off is expressed by scaling to
+# zero replicas, not by a crash loop.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: template-agent
+spec:
+  # Scaled up only where durable execution is wanted. E18-T11: with
+  # the feature off, no worker runs and no connection is attempted.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      # **Off, as the agent has it.** Kubernetes otherwise injects a
+      # legacy `<SERVICE>_PORT=tcp://ip:port` for every Service in
+      # the namespace, and two of those — `AGENT_PORT` and
+      # `POSTGRES_PORT` — are names this application's own settings
+      # use. The worker crash-looped on
+      # `AGENT_PORT: unable to parse 'tcp://10.96.87.255:5002'`
+      # before this line existed.
+      enableServiceLinks: false
+      containers:
+        - name: worker
+          # `localhost/harness:local` and `IfNotPresent`, matching the
+          # agent exactly. Podman qualifies the name on save, so the
+          # unqualified tag with `Never` is an ErrImageNeverPull —
+          # the image is on the node under its full name.
+          image: localhost/harness:local
+          imagePullPolicy: IfNotPresent
+          args: ["worker"]
+          env:
+            - name: EVENT_SERVICE_ENABLED
+              value: "true"
+            - name: TEMPORAL_ADDRESS
+              value: temporal:7233
+            - name: TEMPORAL_NAMESPACE
+              value: default
+            # The service, not localhost: activities call the Agent
+            # Protocol over the network from their own pod.
+            - name: AGENT_BASE_URL
+              value: http://agent:5002
+            - name: PYTHONPATH
+              value: /app/services
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+            limits:
+              memory: 768Mi

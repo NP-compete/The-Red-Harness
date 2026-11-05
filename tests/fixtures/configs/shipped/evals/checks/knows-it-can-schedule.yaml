@@ -1,0 +1,13 @@
+name: knows-it-can-schedule
+group: regression
+decides: >
+  Blocks a change to the tool manifest or the system prompt. This is
+  the failure that was reported, in the user's words: "I cannot wait
+  or schedule a check in 20 seconds, as I don't have access to a
+  timer or delayed execution tool" — said while the scheduler under
+  the agent was running and polling every sixty seconds. An agent
+  that does not know what the platform beneath it can do has the
+  capability and not the feature.
+judge: gemini-3.8-flash
+dataset: evals/datasets/scheduling.json
+cases: [2]

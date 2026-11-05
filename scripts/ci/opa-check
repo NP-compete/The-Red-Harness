@@ -1,0 +1,109 @@
+#!/usr/bin/env sh
+# `harness-opa` — serve the policies, or find out they are broken
+# before they are deployed.
+#
+# `opa` is already a CLI, so this wraps it only where the wrapping
+# earns its place: it knows where the policies live, and it fails
+# the way the other services fail.
+#
+# `check` is the reason this exists. Nothing in the repository
+# validates the five .rego files under config/agent/compliance —
+# no `opa check`, no `opa test`, no rego tests at all. OPA is
+# fail-closed, so a syntax error in any of them is not a broken
+# policy, it is every request denied. That is worth catching in
+# CI rather than in a pod.
+#
+# Exit codes match `harness` and the other services: 0 worked,
+# 1 did not, 2 used wrongly, 5 worked but something is missing.
+
+set -eu
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$HERE/../../.." && pwd)
+POLICIES=${OPA_POLICY_DIR:-$ROOT/config/agent/compliance/policies}
+PORT=${OPA_PORT:-8181}
+
+USAGE_ERROR=2
+DEGRADED=5
+
+need_opa() {
+  command -v opa >/dev/null 2>&1 && return 0
+  echo "opa is not on PATH. Install it, or run this inside the service image." >&2
+  exit 1
+}
+
+cmd_serve() {
+  need_opa
+  echo "harness-opa: serving $POLICIES on :$PORT" >&2
+  exec opa run --server --addr=":$PORT" --log-format=json "$POLICIES"
+}
+
+cmd_check() {
+  need_opa
+  if [ ! -d "$POLICIES" ]; then
+    echo "no policies at $POLICIES" >&2
+    exit "$DEGRADED"
+  fi
+  echo "harness-opa: checking $(find "$POLICIES" -name '*.rego' | wc -l | tr -d ' ') policy file(s)" >&2
+  opa check --strict "$POLICIES"
+  echo "every policy parses" >&2
+}
+
+cmd_test() {
+  need_opa
+  # No test files today. Said out loud rather than passing
+  # silently: `opa test` on a directory with no tests exits 0,
+  # which reads as "the policies are tested".
+  if [ -z "$(find "$POLICIES" -name '*_test.rego' 2>/dev/null)" ]; then
+    echo "no *_test.rego under $POLICIES — nothing to run, and nothing proven" >&2
+    exit "$DEGRADED"
+  fi
+  opa test --verbose "$POLICIES"
+}
+
+cmd_fmt() {
+  need_opa
+  opa fmt --list "$POLICIES"
+}
+
+cmd_doctor() {
+  findings=0
+  command -v opa >/dev/null 2>&1 || { echo "  opa is not on PATH"; findings=1; }
+  [ -d "$POLICIES" ] || { echo "  no policy directory at $POLICIES"; findings=1; }
+  if command -v opa >/dev/null 2>&1 && [ -d "$POLICIES" ]; then
+    opa check --strict "$POLICIES" >/dev/null 2>&1 || { echo "  policies do not parse — run: harness-opa check"; findings=1; }
+  fi
+  [ -n "$(find "$POLICIES" -name '*_test.rego' 2>/dev/null)" ] || echo "  no rego tests (not fatal, but nothing is proven)"
+
+  if [ "$findings" -eq 0 ]; then
+    echo "Nothing to report. The policy service looks usable."
+    exit 0
+  fi
+  exit "$DEGRADED"
+}
+
+case "${1:-}" in
+  serve)  cmd_serve ;;
+  check)  cmd_check ;;
+  test)   cmd_test ;;
+  fmt)    cmd_fmt ;;
+  doctor) cmd_doctor ;;
+  *)
+    cat <<'EOF'
+usage: harness-opa {serve,check,test,fmt,doctor}
+
+  serve     opa run --server over the policy tree
+  check     every .rego parses (strict) — run this in CI
+  test      rego unit tests, if any exist
+  fmt       which files are not formatted
+  doctor    what is missing, before it fails to start
+
+env: OPA_POLICY_DIR (default config/agent/compliance/policies)
+     OPA_PORT       (default 8181)
+
+exit codes: 0 it worked, 1 it did not, 2 used wrongly,
+            5 it worked but something is missing
+EOF
+    exit "$USAGE_ERROR"
+    ;;
+esac

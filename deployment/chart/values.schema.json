@@ -1,0 +1,597 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "Agent deployment values",
+  "description": "Generated from config/agent/deployment/values.yaml. A key the overlays do not know about is a key this rejects.",
+  "type": "object",
+  "properties": {
+    "components": {
+      "type": "object",
+      "properties": {
+        "postgres": {
+          "type": "boolean"
+        },
+        "redis": {
+          "type": "boolean"
+        },
+        "evalWorker": {
+          "type": "boolean"
+        },
+        "scaleToZero": {
+          "type": "boolean"
+        },
+        "externalChannels": {
+          "type": "boolean"
+        },
+        "temporal": {
+          "type": "boolean"
+        },
+        "worker": {
+          "type": "boolean"
+        },
+        "documentsPvc": {
+          "type": "boolean"
+        },
+        "configPvc": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "app": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "component": {
+          "type": "string"
+        },
+        "replicas": {
+          "type": "integer"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "serviceName": {
+          "type": "string"
+        },
+        "partOf": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "image": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "tag": {
+          "type": "string"
+        },
+        "registry": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "container": {
+      "type": "object",
+      "properties": {
+        "port": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "resources": {
+      "type": "object",
+      "properties": {
+        "requests": {
+          "type": "object",
+          "properties": {
+            "memory": {
+              "type": "string"
+            },
+            "cpu": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "memory": {
+              "type": "string"
+            },
+            "cpu": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "autoscaling": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "minReplicas": {
+          "type": "integer"
+        },
+        "maxReplicas": {
+          "type": "integer"
+        },
+        "targetRunsInFlightPerPod": {
+          "type": "integer"
+        },
+        "targetCPUUtilizationPercentage": {
+          "type": "integer"
+        },
+        "scaleDown": {
+          "type": "object",
+          "properties": {
+            "stabilizationWindowSeconds": {
+              "type": "integer"
+            },
+            "percentPerMinute": {
+              "type": "integer"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "datastores": {
+      "type": "object",
+      "properties": {
+        "postgres": {
+          "type": "string"
+        },
+        "redis": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "serviceLinks": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "drain": {
+      "type": "object",
+      "properties": {
+        "terminationGracePeriodSeconds": {
+          "type": "integer"
+        },
+        "preStopSleepSeconds": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "rollout": {
+      "type": "object",
+      "properties": {
+        "maxSurge": {
+          "type": "integer"
+        },
+        "maxUnavailable": {
+          "type": "integer"
+        },
+        "minReadySeconds": {
+          "type": "integer"
+        },
+        "progressDeadlineSeconds": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "probes": {
+      "type": "object",
+      "properties": {
+        "liveness": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "initialDelaySeconds": {
+              "type": "integer"
+            },
+            "periodSeconds": {
+              "type": "integer"
+            },
+            "timeoutSeconds": {
+              "type": "integer"
+            },
+            "failureThreshold": {
+              "type": "integer"
+            }
+          },
+          "additionalProperties": false
+        },
+        "readiness": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "initialDelaySeconds": {
+              "type": "integer"
+            },
+            "periodSeconds": {
+              "type": "integer"
+            },
+            "timeoutSeconds": {
+              "type": "integer"
+            },
+            "failureThreshold": {
+              "type": "integer"
+            }
+          },
+          "additionalProperties": false
+        },
+        "startup": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "initialDelaySeconds": {
+              "type": "integer"
+            },
+            "periodSeconds": {
+              "type": "integer"
+            },
+            "failureThreshold": {
+              "type": "integer"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "networking": {
+      "type": "object",
+      "properties": {
+        "service": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string"
+            },
+            "port": {
+              "type": "integer"
+            }
+          },
+          "additionalProperties": false
+        },
+        "route": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "tls": {
+              "type": "object",
+              "properties": {
+                "termination": {
+                  "type": "string"
+                },
+                "insecureEdgeTerminationPolicy": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "networkPolicy": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "ingress": {
+              "type": "array"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "storage": {
+      "type": "object",
+      "properties": {
+        "documents": {
+          "type": "object",
+          "properties": {
+            "size": {
+              "type": "string"
+            },
+            "accessMode": {
+              "type": "string"
+            },
+            "storageClassName": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "config": {
+          "type": "object",
+          "properties": {
+            "size": {
+              "type": "string"
+            },
+            "accessMode": {
+              "type": "string"
+            },
+            "storageClassName": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "scaleToZero": {
+      "type": "object",
+      "properties": {
+        "pollingIntervalSeconds": {
+          "type": "integer"
+        },
+        "cooldownSeconds": {
+          "type": "integer"
+        },
+        "scalerAddress": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "targetPendingRequests": {
+          "type": "integer"
+        }
+      },
+      "additionalProperties": false
+    },
+    "build": {
+      "type": "object",
+      "properties": {
+        "resources": {
+          "type": "object",
+          "properties": {
+            "requests": {
+              "type": "object",
+              "properties": {
+                "memory": {
+                  "type": "string"
+                },
+                "cpu": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "limits": {
+              "type": "object",
+              "properties": {
+                "memory": {
+                  "type": "string"
+                },
+                "cpu": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "config": {
+      "type": "object",
+      "properties": {
+        "AGENT_HOST": {
+          "type": "string"
+        },
+        "AGENT_PORT": {
+          "type": "string"
+        },
+        "PYTHON_LOG_LEVEL": {
+          "type": "string"
+        },
+        "LANGFUSE_TRACING_ENVIRONMENT": {
+          "type": "string"
+        },
+        "ENABLE_OTEL": {
+          "type": "string"
+        },
+        "OTEL_EXPORTER_OTLP_ENDPOINT": {
+          "type": "string"
+        },
+        "OTEL_EXPORTER_OTLP_INSECURE": {
+          "type": "string"
+        },
+        "OTEL_METRIC_EXPORT_INTERVAL": {
+          "type": "string"
+        },
+        "REQUEST_LOGGING_ENABLED": {
+          "type": "string"
+        },
+        "REQUEST_LOG_HEADERS": {
+          "type": "string"
+        },
+        "REQUEST_LOG_BODY": {
+          "type": "string"
+        },
+        "REQUEST_LOG_BODY_MAX_SIZE": {
+          "type": "string"
+        },
+        "REDIS_URL": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "tuning": {
+      "type": "object",
+      "properties": {
+        "SQLALCHEMY_POOL_SIZE": {
+          "type": "string"
+        },
+        "SQLALCHEMY_MAX_OVERFLOW": {
+          "type": "string"
+        },
+        "LANGGRAPH_MIN_POOL_SIZE": {
+          "type": "string"
+        },
+        "LANGGRAPH_MAX_POOL_SIZE": {
+          "type": "string"
+        },
+        "DB_POOL_MIN_SIZE": {
+          "type": "string"
+        },
+        "DB_POOL_MAX_SIZE": {
+          "type": "string"
+        },
+        "DB_POOL_TIMEOUT": {
+          "type": "string"
+        },
+        "DB_STATEMENT_TIMEOUT_MS": {
+          "type": "string"
+        },
+        "DB_POOL_MAX_IDLE": {
+          "type": "string"
+        },
+        "DB_POOL_MAX_LIFETIME": {
+          "type": "string"
+        },
+        "MAX_CONCURRENT_RUNS": {
+          "type": "string"
+        },
+        "DATETIME_PROMPT_GRANULARITY_SECONDS": {
+          "type": "string"
+        },
+        "REDIS_MAX_CONNECTIONS": {
+          "type": "string"
+        },
+        "REDIS_SOCKET_TIMEOUT": {
+          "type": "string"
+        },
+        "CACHE_ENABLED": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "secrets": {
+      "type": "object",
+      "properties": {
+        "POSTGRES_HOST": {
+          "type": "string"
+        },
+        "POSTGRES_PORT": {
+          "type": "string"
+        },
+        "POSTGRES_DB": {
+          "type": "string"
+        },
+        "POSTGRES_USER": {
+          "type": "string"
+        },
+        "POSTGRES_PASSWORD": {
+          "type": "string"
+        },
+        "SSO_ISSUER_URL": {
+          "type": "string"
+        },
+        "SSO_CLIENT_ID": {
+          "type": "string"
+        },
+        "SSO_CLIENT_SECRET": {
+          "type": "string"
+        },
+        "LANGFUSE_PUBLIC_KEY": {
+          "type": "string"
+        },
+        "LANGFUSE_SECRET_KEY": {
+          "type": "string"
+        },
+        "LANGFUSE_BASE_URL": {
+          "type": "string"
+        },
+        "GOOGLE_APPLICATION_CREDENTIALS_CONTENT": {
+          "type": "string"
+        },
+        "VLLM_BASE_URL": {
+          "type": "string"
+        },
+        "VLLM_API_KEY": {
+          "type": "string"
+        },
+        "REDIS_URL": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "targets": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "object",
+          "properties": {
+            "components": {
+              "type": "object",
+              "properties": {
+                "evalWorker": {
+                  "type": "boolean"
+                },
+                "temporal": {
+                  "type": "boolean"
+                },
+                "worker": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
+            },
+            "app": {
+              "type": "object",
+              "properties": {
+                "replicas": {
+                  "type": "integer"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

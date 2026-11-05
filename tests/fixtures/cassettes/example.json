@@ -1,0 +1,19 @@
+{
+  "exchanges": {
+    "2f8578dbf496a774": {
+      "content": "",
+      "tool_call": {
+        "function": {
+          "arguments": "{\"file_path\": \"/documents/rates.md\"}",
+          "name": "read_file"
+        },
+        "id": "call_1",
+        "type": "function"
+      }
+    },
+    "bfbbfde5f9724933": {
+      "content": "Eight weeks after five years, per the policy document."
+    }
+  },
+  "note": "Written by hand to exercise the player, not recorded from a model. A real cassette comes from `make cassette-record NAME=... PROMPTS=...` and carries what a real model actually said; this one would teach a test nothing beyond that replay works."
+}

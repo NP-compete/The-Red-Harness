@@ -1,0 +1,64 @@
+# Letting another system call this agent.
+#
+# Off. Everything else in this tree configures the agent acting as
+# a person against somebody else's system; this is the other
+# direction, and opening it is a decision rather than a default.
+#
+# Whose authority an inbound run carries is the whole question,
+# and there are exactly two acceptable answers:
+#
+#   oauth          the calling person's. The run behaves as if
+#                  they had typed it — their approval policy,
+#                  their connected integrations.
+#   service_token  a service identity with its own, narrower
+#                  policy, for automation with nobody behind it.
+#                  It cannot inherit anyone's connections.
+#
+# There is no third. A run on the agent's own credentials would
+# hand every caller every integration this deployment has
+# connected, so it has no spelling here — not a setting that is
+# refused, but one that does not exist.
+#
+# Enabling this without naming an auth mode is a startup failure.
+# A default would decide the question above on nobody's behalf.
+
+mcp_server:
+  enabled: false
+
+  auth:
+    # Required once enabled. No default, deliberately.
+    mode: ""
+    required_scopes: []
+
+  # Declared, never projected. Publishing everything the agent can
+  # do would change this interface whenever somebody adds a skill,
+  # and a consumer would find out when it broke.
+  #
+  # tools:
+  #   - name: ask
+  #     description: "Ask this agent a question and get an answer"
+  #     scope: read      # read | act
+  tools: []
+
+  # What one caller may use before it is somebody else's turn.
+  #
+  # Absent means no limits, which is the right default for a door
+  # that is shut. Set them when you open it: an inbound caller is a
+  # program, and a loop with a bug does not get bored and go away —
+  # it exhausts the budget in minutes and everybody else, including
+  # the people using the interface, gets the failure.
+  #
+  # Two settings, because they catch different things. The rate
+  # catches a caller going too fast. It does nothing about a caller
+  # going at exactly the agreed rate and spending the month's
+  # budget by Thursday, which is what daily_spend is for.
+  #
+  # Both are per caller, keyed on the verified identity on the
+  # request. A deployment-wide limit would mean the noisy caller
+  # takes everyone else down with it, which is the thing being
+  # prevented.
+  #
+  # limits:
+  #   per_second: 2         # defaults to 60 once limits are set
+  #   burst: 10             # defaults to per_second
+  #   daily_spend: "5.00"   # in the rate card's currency; omit for none

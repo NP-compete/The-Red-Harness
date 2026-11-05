@@ -1,0 +1,11 @@
+name: approval-before-scheduling
+group: tool_correctness
+decides: >
+  Blocks the release and reopens the approval policy for
+  schedule_task. A schedule starts runs later, unattended, until
+  somebody cancels it — creating one without being asked is an
+  action taken in a person's absence, and the gate is the only
+  thing in front of it.
+judge: gemini-3.8-flash
+dataset: evals/datasets/scheduling.json
+cases: [1]

@@ -1,0 +1,412 @@
+"""Shutdown orchestrator — coordinated teardown on SIGTERM."""
+
+import asyncio
+import os
+import signal
+import time
+from typing import Any
+
+from agent.utils.pylogger import get_python_logger
+
+logger = get_python_logger()
+
+_shutting_down = False
+_shutdown_complete = False
+_atexit_registered = False
+
+_shutdown_task: Any = None
+
+SHUTDOWN_DRAIN_SECONDS = int(os.environ.get("SHUTDOWN_DRAIN_SECONDS", "15"))
+SHUTDOWN_LANGFUSE_TIMEOUT_SECONDS = int(
+    os.environ.get("SHUTDOWN_LANGFUSE_TIMEOUT_SECONDS", "5")
+)
+SHUTDOWN_GRACE_PERIOD_SECONDS = int(
+    os.environ.get("SHUTDOWN_GRACE_PERIOD_SECONDS", "60")
+)
+
+_TOTAL_BUDGET = SHUTDOWN_DRAIN_SECONDS + SHUTDOWN_LANGFUSE_TIMEOUT_SECONDS
+_HEADROOM = SHUTDOWN_GRACE_PERIOD_SECONDS - _TOTAL_BUDGET
+if _HEADROOM < 5:
+    logger.warning(
+        "Shutdown budget (%ds drain + %ds langfuse = %ds) "
+        "leaves only %ds before SIGKILL at %ds. Risk of incomplete cleanup.",
+        SHUTDOWN_DRAIN_SECONDS,
+        SHUTDOWN_LANGFUSE_TIMEOUT_SECONDS,
+        _TOTAL_BUDGET,
+        _HEADROOM,
+        SHUTDOWN_GRACE_PERIOD_SECONDS,
+    )
+
+
+def is_shutting_down() -> bool:
+    """Return True once shutdown has been initiated."""
+    return _shutting_down
+
+
+def register_atexit() -> None:
+    """Register the sync shutdown as an atexit callback."""
+    global _atexit_registered  # noqa: PLW0603
+    if _atexit_registered:
+        return
+    _atexit_registered = True
+
+    import atexit
+
+    atexit.register(run_shutdown_sync)
+    logger.info("Shutdown atexit handler registered")
+
+
+def run_shutdown_sync() -> None:
+    """Run shutdown synchronously at process exit via atexit."""
+    global _shutting_down, _shutdown_complete  # noqa: PLW0603
+
+    if _shutdown_complete:
+        return
+    if _shutting_down:
+        logger.debug("Async shutdown already ran — sync cleanup skipped")
+        _shutdown_complete = True
+        return
+
+    _shutting_down = True
+    t0 = time.monotonic()
+    results: dict[str, str] = {}
+
+    import sys
+
+    print("[shutdown] Graceful shutdown started", file=sys.stderr, flush=True)
+    logger.info("Sync shutdown initiated (atexit)")
+
+    for key, step in [
+        ("inflight", _persist_inflight_runs),
+        ("otel", _shutdown_otel),
+        ("langfuse", _shutdown_langfuse_sync),
+        ("graph_cache", _clear_graph_cache),
+        ("ldap", _close_ldap_sync),
+        ("redis", _close_redis),
+        ("postgres", _close_postgres_sync),
+    ]:
+        try:
+            results[key] = step()
+        except Exception as exc:
+            logger.warning("Shutdown step '%s' failed: %s", key, exc)
+            results[key] = f"error: {exc}"
+
+    _shutdown_complete = True
+    elapsed = round((time.monotonic() - t0) * 1000, 1)
+    print(
+        f"[shutdown] Graceful shutdown complete in {elapsed}ms: {results}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def register_signal_handlers() -> None:
+    """Install loop-aware SIGTERM/SIGINT handlers."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        logger.warning("No running event loop — signal handlers not registered")
+        return
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, _handle_signal, sig, loop)
+
+    logger.info("Shutdown signal handlers registered (SIGTERM, SIGINT)")
+
+
+def _handle_signal(signum: int, loop: asyncio.AbstractEventLoop) -> None:
+    global _shutting_down  # noqa: PLW0603
+    _shutting_down = True
+    logger.info("Signal %d received — scheduling async shutdown", signum)
+    global _shutdown_task  # noqa: PLW0603
+    _shutdown_task = loop.create_task(_shutdown_and_exit())
+
+
+async def _shutdown_and_exit() -> None:
+    """Run graceful shutdown then terminate the process."""
+    await run_shutdown()
+    logger.info("Shutdown complete — exiting")
+    import sys
+
+    sys.exit(0)
+
+
+_async_shutdown_started = False
+
+
+async def run_shutdown() -> dict[str, str]:
+    """Full async shutdown with drain period."""
+    global _shutting_down, _shutdown_complete, _async_shutdown_started  # noqa: PLW0603
+
+    if _shutdown_complete or _async_shutdown_started:
+        return {"status": "already_complete"}
+
+    _async_shutdown_started = True
+    _shutting_down = True
+
+    t0 = time.monotonic()
+    results: dict[str, str] = {}
+
+    logger.info("Async shutdown initiated")
+
+    for key, step in [
+        ("drain", _drain),
+        ("inflight", _persist_inflight_runs),
+        ("otel", _shutdown_otel),
+        ("langfuse", _shutdown_langfuse),
+        ("graph_cache", _clear_graph_cache),
+        ("ldap", _close_ldap),
+        ("redis", _close_redis_async),
+        ("postgres", _close_postgres),
+    ]:
+        try:
+            step_result = step()
+            if asyncio.iscoroutine(step_result):
+                step_result = await step_result
+            results[key] = str(step_result)
+        except Exception as exc:
+            logger.warning("Shutdown step '%s' failed: %s", key, exc)
+            results[key] = f"error: {exc}"
+
+    _shutdown_complete = True
+    elapsed = round((time.monotonic() - t0) * 1000, 1)
+
+    logger.info("Async shutdown complete in %.1fms: %s", elapsed, results)
+    return results
+
+
+def _persist_inflight_runs() -> str:
+    """Persist inflight runs to Postgres before shutdown."""
+    try:
+        from agent.src.settings import settings as app_settings
+
+        if not app_settings.LIFECYCLE_PERSISTENCE_ENABLED:
+            return "skipped: lifecycle persistence disabled"
+
+        from agent.aegra.lifecycle import (
+            _get_active_runs,
+            persist_inflight_runs,
+        )
+
+        waiting = len(_get_active_runs() or {})
+        count = persist_inflight_runs()
+        if count < waiting:
+            return (
+                f"error: {count}/{waiting} runs persisted — the rest keep "
+                "their leases until those expire on their own"
+            )
+        return f"ok: {count} runs persisted"
+    except Exception as exc:
+        logger.warning("Inflight persistence failed: %s", exc)
+        return f"error: {exc}"
+
+
+async def _drain() -> str:
+    if SHUTDOWN_DRAIN_SECONDS <= 0:
+        return "skipped: drain disabled"
+    logger.info("Draining for %ds", SHUTDOWN_DRAIN_SECONDS)
+    await asyncio.sleep(SHUTDOWN_DRAIN_SECONDS)
+    return "ok"
+
+
+async def _shutdown_langfuse() -> str:
+    try:
+        from agent.aegra.telemetry import get_langfuse_client
+
+        client = get_langfuse_client()
+        if client is None:
+            return "skipped: not configured"
+
+        await asyncio.wait_for(
+            asyncio.to_thread(_langfuse_shutdown_blocking, client),
+            timeout=SHUTDOWN_LANGFUSE_TIMEOUT_SECONDS,
+        )
+        return "ok"
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Langfuse shutdown timed out after %ds", SHUTDOWN_LANGFUSE_TIMEOUT_SECONDS
+        )
+        return "timeout"
+    except Exception as exc:
+        logger.warning("Langfuse shutdown failed: %s", exc)
+        return f"error: {exc}"
+
+
+def _shutdown_langfuse_sync() -> str:
+    """Sync Langfuse flush for atexit path."""
+    try:
+        from agent.aegra.telemetry import _langfuse_configured
+
+        if not _langfuse_configured():
+            return "skipped: not configured"
+
+        from langfuse import get_client
+
+        client = get_client()
+        _langfuse_shutdown_blocking(client)
+        return "ok"
+    except Exception as exc:
+        return f"skipped: {exc}"
+
+
+def _langfuse_shutdown_blocking(client: Any) -> None:
+    """Run the sync Langfuse shutdown."""
+    if hasattr(client, "shutdown"):
+        client.shutdown()
+    elif hasattr(client, "flush"):
+        client.flush()
+
+
+def _clear_graph_cache() -> str:
+    try:
+        from agent.aegra.graph import _graph_cache, _graph_cache_ts
+
+        count = len(_graph_cache)
+        _graph_cache.clear()
+        _graph_cache_ts.clear()
+        if count > 0:
+            logger.info("Cleared %d cached graph(s)", count)
+        return "ok"
+    except Exception as exc:
+        logger.warning("Graph cache clear failed: %s", exc)
+        return f"error: {exc}"
+
+
+def _shutdown_otel() -> str:
+    """Shutdown OpenTelemetry providers and flush pending telemetry."""
+    try:
+        from agent.aegra.otel import shutdown_telemetry
+
+        shutdown_telemetry()
+        return "ok"
+    except Exception as exc:
+        logger.warning("OTEL shutdown failed: %s", exc)
+        return f"error: {exc}"
+
+
+async def _close_ldap() -> str:
+    """Close the LDAP connection and clear the membership cache."""
+    try:
+        from agent.src.ldap.service import close_ldap
+
+        await asyncio.to_thread(close_ldap)
+        return "ok"
+    except Exception as exc:
+        logger.warning("LDAP close failed: %s", exc)
+        return f"error: {exc}"
+
+
+def _close_ldap_sync() -> str:
+    """Close the LDAP connection synchronously (atexit path)."""
+    try:
+        from agent.src.ldap.service import close_ldap
+
+        close_ldap()
+        return "ok"
+    except Exception as exc:
+        logger.warning("LDAP close failed: %s", exc)
+        return f"error: {exc}"
+
+
+def _close_redis() -> str:
+    """Close the sync client. Used by the atexit path, which has no loop."""
+    try:
+        from agent.aegra.redis import close_redis_client
+
+        close_redis_client()
+        return "ok"
+    except Exception as exc:
+        logger.warning("Redis close failed: %s", exc)
+        return f"error: {exc}"
+
+
+async def _close_redis_async() -> str:
+    """Close both clients. The async client needs a running loop."""
+    try:
+        from agent.aegra.redis import (
+            close_async_redis_client,
+            close_redis_client,
+        )
+
+        await close_async_redis_client()
+        close_redis_client()
+        return "ok"
+    except Exception as exc:
+        logger.warning("Redis close failed: %s", exc)
+        return f"error: {exc}"
+
+
+async def _close_postgres() -> str:
+    """Close Postgres connection pools (aegra db_manager + personalization)."""
+    closed = []
+    try:
+        from aegra_api.core.database import db_manager
+
+        if db_manager.engine is not None:
+            await db_manager.close()
+            closed.append("db_manager")
+    except Exception as exc:
+        logger.warning("db_manager close failed: %s", exc)
+
+    try:
+        from agent.src.personalization.repository import _pool_lock, _pool_registry
+
+        async with _pool_lock:
+            pool_count = len(_pool_registry)
+            for uri, pool in list(_pool_registry.items()):
+                try:
+                    await pool.close()
+                except Exception as exc:
+                    logger.warning("Pool close failed for %s: %s", uri[:40], exc)
+            _pool_registry.clear()
+            if pool_count:
+                closed.append("personalization")
+    except Exception as exc:
+        logger.warning("Personalization pool close failed: %s", exc)
+
+    try:
+        from agent.src.db import pool as shared_pool
+
+        if shared_pool._pool is not None:  # noqa: SLF001
+            await shared_pool.close_pool()
+            closed.append("shared")
+    except Exception as exc:
+        logger.warning("Shared pool close failed: %s", exc)
+
+    return f"ok: {', '.join(closed)}" if closed else "skipped: no pools"
+
+
+def _close_postgres_sync() -> str:
+    """Close Postgres pools synchronously (atexit path)."""
+    try:
+        from aegra_api.core.database import db_manager
+
+        from agent.src.personalization.repository import _pool_registry
+
+        if (
+            db_manager.engine is None
+            and db_manager.lg_pool is None
+            and not _pool_registry
+        ):
+            return "skipped: not initialized"
+
+        created_loop = False
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("closed")
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            created_loop = True
+
+        try:
+            result = loop.run_until_complete(_close_postgres())
+            return result
+        finally:
+            if created_loop:
+                loop.close()
+                asyncio.set_event_loop(None)
+    except Exception as exc:
+        logger.warning("Postgres sync close failed: %s", exc)
+        return f"error: {exc}"

@@ -1,0 +1,137 @@
+"""Error-handling node wrappers for graph execution.
+
+Dormant: nothing imports it. These wrap a node so a raised
+exception becomes a state update rather than a failed run, which
+is the behaviour `deepagents` now provides itself. Kept as the
+reference for what that wrapping has to do, for anyone building a
+graph outside the library.
+"""
+
+import asyncio
+import time
+from collections.abc import Callable
+from functools import wraps
+from typing import Any
+
+from tenacity import (
+    RetryCallState,
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
+from agent.src.settings import settings
+from agent.utils.pylogger import get_python_logger
+
+logger = get_python_logger()
+
+MAX_NODE_RETRIES = settings.MAX_NODE_RETRIES
+RETRY_DELAY_SECONDS = settings.NODE_RETRY_DELAY_SECONDS
+
+
+def _log_node_retry(retry_state: RetryCallState) -> None:
+    """Log node retry attempts."""
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    logger.warning(
+        "Retry %d/%s for node '%s': %s",
+        retry_state.attempt_number,
+        getattr(retry_state.retry_object.stop, "max_attempt_number", 0),
+        retry_state.fn.__name__ if retry_state.fn else "unknown",
+        exc,
+    )
+
+
+def with_error_handling(node_name: str) -> Callable[..., Any]:
+    """Add structured error handling to a graph node."""
+
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return fn(*args, **kwargs)
+            except Exception:
+                logger.exception("Node '%s' failed", node_name)
+                raise
+
+        @wraps(fn)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return await fn(*args, **kwargs)
+            except Exception:
+                logger.exception("Node '%s' failed", node_name)
+                raise
+
+        if asyncio.iscoroutinefunction(fn):
+            return async_wrapper
+        return wrapper
+
+    return decorator
+
+
+def with_retry(
+    max_retries: int = MAX_NODE_RETRIES,
+    delay: float = RETRY_DELAY_SECONDS,
+    retry_on: tuple[type[Exception], ...] = (ConnectionError, TimeoutError, OSError),
+) -> Callable[..., Any]:
+    """Retry a node function on failure using tenacity."""
+
+    def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
+        tenacity_retry = retry(
+            retry=retry_if_exception_type(retry_on),
+            stop=stop_after_attempt(max_retries + 1),
+            wait=wait_exponential(multiplier=delay, min=delay, max=delay * 10),
+            before_sleep=_log_node_retry,
+            reraise=True,
+        )
+
+        if asyncio.iscoroutinefunction(fn):
+
+            @wraps(fn)
+            async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+                @tenacity_retry
+                async def _inner() -> Any:
+                    return await fn(*args, **kwargs)
+
+                return await _inner()
+
+            return async_wrapper
+        else:
+            wrapped: Callable[..., Any] = tenacity_retry(fn)
+            return wrapped
+
+    return decorator
+
+
+def timed_node(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Log execution duration of a node function."""
+
+    @wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        start = time.perf_counter()
+        try:
+            result = fn(*args, **kwargs)
+            elapsed = time.perf_counter() - start
+            logger.info("Node '%s' completed in %.2fs", fn.__name__, elapsed)
+            return result
+        except Exception:
+            elapsed = time.perf_counter() - start
+            logger.error("Node '%s' failed after %.2fs", fn.__name__, elapsed)
+            raise
+
+    @wraps(fn)
+    async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+        start = time.perf_counter()
+        try:
+            result = await fn(*args, **kwargs)
+            elapsed = time.perf_counter() - start
+            logger.info("Node '%s' completed in %.2fs", fn.__name__, elapsed)
+            return result
+        except Exception:
+            elapsed = time.perf_counter() - start
+            logger.error("Node '%s' failed after %.2fs", fn.__name__, elapsed)
+            raise
+
+    if asyncio.iscoroutinefunction(fn):
+        return async_wrapper
+    return wrapper

@@ -1,0 +1,349 @@
+"""Unit tests for production security hardening (RHITAIF-220)."""
+
+import os
+from unittest.mock import patch
+
+import pytest
+from fastapi import Request
+from starlette.testclient import TestClient
+
+from agent.src.exceptions import AppException
+
+
+class TestEnvironmentEnforcement:
+    """Tests for ENVIRONMENT-based security enforcement."""
+
+    def test_production_rejects_auth_bypass_at_startup(self):
+        """Test that ENVIRONMENT=production rejects ENABLE_AUTH=false at import."""
+        with patch.dict(
+            os.environ, {"ENVIRONMENT": "production", "ENABLE_AUTH": "false"}
+        ):
+            with pytest.raises(
+                RuntimeError, match="ENABLE_AUTH=false is not permitted"
+            ):
+                import importlib
+
+                from agent.aegra import auth
+
+                importlib.reload(auth)
+
+    def test_development_allows_auth_bypass(self):
+        """Test that ENVIRONMENT=development allows ENABLE_AUTH=false."""
+        with patch.dict(
+            os.environ, {"ENVIRONMENT": "development", "ENABLE_AUTH": "false"}
+        ):
+            import importlib
+
+            from agent.aegra import auth
+
+            importlib.reload(auth)
+            assert auth.ENVIRONMENT == "development"
+            assert auth.ENABLE_AUTH is False
+
+    def test_production_flag_detection(self):
+        """Test settings.is_production property."""
+        from agent.src.settings import Settings
+
+        prod_settings = Settings(ENVIRONMENT="production")
+        assert prod_settings.is_production is True
+
+        dev_settings = Settings(ENVIRONMENT="development")
+        assert dev_settings.is_production is False
+
+
+class TestMCPSSLVerificationEnforcement:
+    """Tests for MCP SSL verification in production."""
+
+    def test_production_enforces_ssl_verify_true(self):
+        """Test that ssl_verify=false is overridden in production."""
+        from agent.src.settings import Settings
+
+        prod_settings = Settings(ENVIRONMENT="production")
+        with patch("agent.src.settings.settings", prod_settings):
+            from agent.aegra.mcp import mcp_httpx_verify
+
+            assert mcp_httpx_verify({"ssl_verify": False, "name": "test"}) is True
+
+    def test_development_allows_ssl_verify_false(self):
+        """Test that ssl_verify=false is allowed in development."""
+        from agent.src.settings import Settings
+
+        dev_settings = Settings(ENVIRONMENT="development")
+        with patch("agent.src.settings.settings", dev_settings):
+            from agent.aegra.mcp import mcp_httpx_verify
+
+            assert mcp_httpx_verify({"ssl_verify": False}) is False
+
+    def test_ssl_verify_defaults_to_true(self):
+        """Test that ssl_verify defaults to True when not specified."""
+        from agent.aegra.mcp import mcp_httpx_verify
+
+        assert mcp_httpx_verify({}) is True
+
+
+class TestSecurityHeaders:
+    """Tests for HTTP security headers middleware."""
+
+    def test_security_headers_present(self):
+        """Test that all OWASP security headers are set."""
+        from agent.aegra.http_app import app
+
+        client = TestClient(app)
+
+        with patch.dict(os.environ, {"ENABLE_AUTH": "false"}):
+            response = client.get("/")
+
+            assert response.headers["X-Content-Type-Options"] == "nosniff"
+            assert response.headers["X-Frame-Options"] == "DENY"
+            assert response.headers["X-XSS-Protection"] == "1; mode=block"
+            assert (
+                response.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+            )
+            assert "Permissions-Policy" in response.headers
+            assert "Content-Security-Policy" in response.headers
+
+    def test_hsts_header_in_production(self):
+        """Test that HSTS header is set in production."""
+        from agent.aegra.http_app import app
+        from agent.src.settings import Settings
+
+        with patch(
+            "agent.aegra.security_middleware.settings",
+            Settings(ENVIRONMENT="production"),
+        ):
+            client = TestClient(app)
+
+            with patch.dict(os.environ, {"ENABLE_AUTH": "false"}):
+                response = client.get("/")
+                assert "Strict-Transport-Security" in response.headers
+
+
+class TestRequestSizeLimit:
+    """Tests for request body size validation."""
+
+    def test_rejects_oversized_request(self):
+        """Test that requests exceeding max size are rejected."""
+        from agent.aegra.http_app import app
+
+        client = TestClient(app)
+
+        with patch.dict(os.environ, {"ENABLE_AUTH": "false"}):
+            response = client.post(
+                "/feedback",
+                json={"trace_id": "a" * 32},
+                headers={"Content-Length": str(11 * 1024 * 1024)},
+            )
+
+            assert response.status_code == 413
+            assert "exceeds maximum size" in response.json()["detail"]
+
+    def test_accepts_normal_sized_request(self):
+        """Test that normal-sized requests are accepted."""
+        from agent.aegra.http_app import app
+
+        client = TestClient(app)
+
+        normal_payload = {
+            "trace_id": "a" * 32,
+            "name": "test",
+            "value": 1.0,
+        }
+
+        with patch.dict(os.environ, {"ENABLE_AUTH": "false"}):
+            with patch("agent.aegra.feedback.get_langfuse_client", return_value=None):
+                response = client.post("/feedback", json=normal_payload)
+
+            assert response.status_code != 413
+
+
+class TestPIIScrubbing:
+    """Tests for PII scrubbing in error responses."""
+
+    def test_scrubs_email_addresses(self):
+        """Test that email addresses are redacted."""
+        from agent.src.pii_scrubber import scrub_pii
+
+        text = "Error: user john.doe@example.com not found"
+        scrubbed = scrub_pii(text)
+        assert "john.doe@example.com" not in scrubbed
+        assert "[EMAIL_REDACTED]" in scrubbed
+
+    def test_scrubs_file_paths(self):
+        """Test that file paths are redacted."""
+        from agent.src.pii_scrubber import scrub_pii
+
+        text = "File not found: /home/user/secrets/config.yaml"
+        scrubbed = scrub_pii(text)
+        assert "/home/user/secrets" not in scrubbed
+        assert "[PATH]" in scrubbed
+
+    def test_scrubs_jwt_tokens(self):
+        """Test that JWT tokens are redacted."""
+        from agent.src.pii_scrubber import scrub_pii
+
+        text = "Token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
+        scrubbed = scrub_pii(text)
+        assert "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" not in scrubbed
+        assert "[TOKEN_REDACTED]" in scrubbed
+
+    def test_scrubs_sensitive_dict_keys(self):
+        """Test that sensitive dictionary keys are redacted."""
+        from agent.src.pii_scrubber import scrub_dict
+
+        data = {
+            "username": "alice",
+            "password": "secret123",
+            "api_key": "sk-1234567890",
+            "message": "hello",
+        }
+        scrubbed = scrub_dict(data)
+        assert scrubbed["password"] == "[REDACTED]"
+        assert scrubbed["api_key"] == "[REDACTED]"
+        assert scrubbed["username"] == "alice"
+        assert scrubbed["message"] == "hello"
+
+    def test_scrubs_pii_regardless_of_environment(self):
+        """Test that PII is always scrubbed regardless of environment."""
+        from agent.src.pii_scrubber import scrub_pii
+
+        text = "Error: user john@example.com at /home/user/file.txt"
+        scrubbed = scrub_pii(text)
+        assert "john@example.com" not in scrubbed
+        assert "[EMAIL_REDACTED]" in scrubbed
+
+
+class TestConfigValidation:
+    """Tests for production configuration validation."""
+
+    def test_validate_config_enforces_auth_in_production(self):
+        """Test that validate_config rejects ENABLE_AUTH=false in production."""
+        from agent.src.settings import Settings, validate_config
+
+        settings = Settings(ENVIRONMENT="production", ENABLE_AUTH=False)
+
+        with pytest.raises(AppException, match="ENABLE_AUTH must be true"):
+            validate_config(settings)
+
+    def test_validate_config_allows_dev_mode(self):
+        """Test that validate_config allows auth bypass in development."""
+        from agent.src.settings import Settings, validate_config
+
+        settings = Settings(ENVIRONMENT="development", ENABLE_AUTH=False)
+
+        validate_config(settings)
+
+
+class TestErrorResponseScrubbing:
+    """Tests for global exception handler PII scrubbing."""
+
+    def test_error_response_scrubbed(self):
+        """Test that unhandled exceptions are scrubbed."""
+        from agent.src.pii_scrubber import scrub_error_response
+
+        exc = ValueError("Invalid email: user@example.com")
+        response = scrub_error_response("Error occurred", exc)
+
+        assert "user@example.com" not in str(response)
+        assert response["exception_type"] == "ValueError"
+        assert "exception_message" not in response
+
+    def test_error_response_always_scrubs(self):
+        """Test that error responses are always scrubbed regardless of environment."""
+        from agent.src.pii_scrubber import scrub_error_response
+
+        exc = ValueError("Invalid email: user@example.com")
+        response = scrub_error_response("Error occurred", exc)
+
+        assert response["detail"] == "Error occurred"
+        assert response["exception_type"] == "ValueError"
+        assert "exception_message" not in response
+
+
+class TestBodySizeLimits:
+    """Body caps must hold before anything parses or spools the body."""
+
+    GLOBAL = 1024
+    UPLOAD = 4096
+
+    def _app(self):
+        from fastapi import FastAPI
+
+        from agent.aegra.security_middleware import (
+            RequestSizeLimitMiddleware,
+            StreamingBodyLimitMiddleware,
+        )
+
+        limits = {"/upload": self.UPLOAD}
+        app = FastAPI()
+        app.add_middleware(
+            StreamingBodyLimitMiddleware,
+            max_size_bytes=self.GLOBAL,
+            path_limits=limits,
+        )
+        app.add_middleware(
+            RequestSizeLimitMiddleware,
+            max_size_bytes=self.GLOBAL,
+            path_limits=limits,
+        )
+
+        @app.post("/upload")
+        async def _upload(request: Request):
+            body = await request.body()
+            return {"read": len(body)}
+
+        @app.post("/other")
+        async def _other(request: Request):
+            body = await request.body()
+            return {"read": len(body)}
+
+        return app
+
+    def test_global_limit_applies_to_ordinary_routes(self):
+        client = TestClient(self._app())
+        assert (
+            client.post("/other", content=b"x" * (self.GLOBAL - 10)).status_code == 200
+        )
+        assert (
+            client.post("/other", content=b"x" * (self.GLOBAL + 10)).status_code == 413
+        )
+
+    def test_upload_gets_a_higher_limit_but_is_not_exempt(self):
+        client = TestClient(self._app())
+        ok = client.post("/upload", content=b"x" * (self.GLOBAL + 100))
+        assert ok.status_code == 200
+        assert (
+            client.post("/upload", content=b"x" * (self.UPLOAD + 100)).status_code
+            == 413
+        )
+
+    def test_chunked_body_without_content_length_is_still_capped(self):
+        """Content-Length is caller-controlled and absent when chunked."""
+        client = TestClient(self._app())
+
+        def body():
+            for _ in range(20):
+                yield b"x" * 1024
+
+        res = client.post("/upload", content=body())
+        assert res.status_code == 413, "chunked body bypassed the cap"
+
+    def test_handler_never_sees_an_oversized_body(self):
+        """The cap must cut in before the route runs, not inside it."""
+        reached = []
+
+        from fastapi import FastAPI
+
+        from agent.aegra.security_middleware import StreamingBodyLimitMiddleware
+
+        app = FastAPI()
+        app.add_middleware(StreamingBodyLimitMiddleware, max_size_bytes=self.GLOBAL)
+
+        @app.post("/sink")
+        async def _sink(request: Request):
+            await request.body()
+            reached.append(1)
+            return {"ok": True}
+
+        res = TestClient(app).post("/sink", content=b"x" * (self.GLOBAL * 10))
+        assert res.status_code == 413
+        assert reached == [], "handler ran despite an oversized body"

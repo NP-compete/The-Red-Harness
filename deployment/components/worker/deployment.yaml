@@ -1,0 +1,50 @@
+# The Temporal worker (E18-T3). Same image and tag as the agent,
+# differing only in `args`, so the two cannot be different versions.
+#
+# No probe: it serves no HTTP. Turning it off means removing this
+# component, not scaling to zero — with the flag off the process
+# exits 0 and Kubernetes restarts it forever.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  labels:
+    component: durable-execution
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+        component: durable-execution
+    spec:
+      # Service links inject AGENT_PORT and POSTGRES_PORT as
+      # tcp:// URLs, which collide with this app's own settings.
+      enableServiceLinks: false
+      containers:
+        - name: worker
+          image: localhost/harness:local
+          args: ["worker"]
+          envFrom:
+            - configMapRef:
+                name: agent-config
+            - secretRef:
+                name: agent-env
+                optional: true
+          env:
+            - name: EVENT_SERVICE_ENABLED
+              value: "true"
+            # The service: activities call the API from their own pod.
+            - name: AGENT_BASE_URL
+              value: http://agent:5002
+            - name: PYTHONPATH
+              value: /app/services
+          resources:
+            requests:
+              cpu: 50m
+              memory: 192Mi
+            limits:
+              memory: 768Mi

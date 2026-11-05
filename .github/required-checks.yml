@@ -1,0 +1,73 @@
+# What must pass before a pull request merges (E26-T10).
+#
+# One declaration, in the repository, rather than a branch
+# protection rule somebody set in a browser two years ago. The
+# rule is generated from this file; the file is reviewed like
+# code.
+#
+# **The name is the job's `name:`, not its key.** Branch
+# protection matches the check name GitHub shows, which is the
+# `name:` when a job has one. Getting this wrong produces a
+# required check that never arrives and a pull request that can
+# never merge — a failure mode with no error message anywhere.
+#
+# **A job skipped by a path filter still has to report.** A
+# required check that is skipped reports success on GitHub, which
+# is what makes `kind-tier` safe to gate on a label: skipped
+# means "this change does not touch deployment", not "the cluster
+# was not tried and we shrugged".
+
+required:
+  # Everything here runs on every pull request.
+  - workflow: test.yml
+    checks:
+      # One job where there were two. The checks and the unit
+      # suite are Dagger functions in `ci/` now, run by a single
+      # `make ci` step, so there is one status check to require
+      # instead of two names kept in step with the workflow by hand.
+      - Checks
+      - Integration (compose)
+
+  - workflow: pre-commit.yml
+    checks:
+      - Pre Commit
+      - Gitleaks
+
+  - workflow: dependency-review.yml
+    checks:
+      - Dependency Review
+
+  - workflow: pr-title.yml
+    checks:
+      - Conventional Commit Title
+
+  - workflow: draft-check.yml
+    checks:
+      - Not Draft
+
+# Runs on every pull request, reports success when its path
+# filter skips it, and must still be required: a deployment
+# change that merged without it is the case this tier exists for.
+conditional:
+  - workflow: test.yml
+    check: Cluster (kind)
+    when: >-
+      a push to a default branch, or a pull request labelled
+      `deployment`. A cluster is minutes, and running one for a
+      docstring is how a pipeline becomes something people wait
+      for rather than something that tells them anything.
+
+# Not required, and each for a reason rather than by omission.
+advisory:
+  - check: Scorecard Analysis
+    why: >-
+      scores a repository's posture over time. A score that dips
+      is worth reading and is not a reason to block one change.
+  - check: License Scan
+    why: >-
+      blocks on a licence nobody has reviewed yet, which is a
+      conversation rather than a build failure.
+  - check: Check Issue Link
+    why: >-
+      a convention worth keeping and not worth blocking a
+      one-line revert at two in the morning.

@@ -1,0 +1,208 @@
+import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import {
+  Alert,
+  AlertActionCloseButton,
+  Button,
+  TextInput,
+} from '@patternfly/react-core';
+import { Bot, CheckCircle, XCircle } from 'lucide-react';
+import { verifyMcpOAuthConnected } from '../services/mcp-oauth-api';
+import type { InterruptInfo } from '../types/deep-agent';
+import { McpConnectRow } from './McpConnectRow';
+
+interface InterruptBannerProps {
+  readonly interrupt: InterruptInfo;
+  readonly onResume: (response: string) => void;
+  readonly onDismiss: () => void;
+}
+
+/** Severity the agent attached to this approval, if any. */
+type ApprovalRisk = 'high' | 'low' | 'normal';
+
+/**
+ * Read the risk marker the agent prefixes onto an interrupt description.
+ *
+ * Without it every approval renders identically, so deleting a user
+ * looks the same as reading a file and people learn to approve without
+ * reading. Falls back to `normal` for interrupts that carry no marker.
+ */
+function approvalRisk(value: string): ApprovalRisk {
+  if (value.includes('[HIGH RISK]')) return 'high';
+  if (value.includes('[low risk]')) return 'low';
+  return 'normal';
+}
+
+/** The marker is for the UI, not the reader. */
+function stripRiskMarker(value: string): string {
+  return value.replace('[HIGH RISK]', '').replace('[low risk]', '').trimStart();
+}
+
+function isToolApproval(value: string): boolean {
+  // A risk marker is only ever emitted for a tool-approval interrupt, so
+  // it is a definitive signal. The keyword match below is the fallback
+  // for interrupts that carry no marker — without the marker check, an
+  // approval whose wording happens to avoid these words renders as a
+  // generic prompt with no Approve/Reject buttons.
+  if (approvalRisk(value) !== 'normal') return true;
+
+  const lower = value.toLowerCase();
+  return lower.includes('approve') || lower.includes('confirm') || lower.includes('permission')
+    || lower.includes('allow') || lower.includes('proceed');
+}
+
+function interruptValueAsString(value: string | object): string {
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value, null, 2);
+}
+
+function parseMcpAuthPayload(interrupt: InterruptInfo): InterruptInfo['payload'] | null {
+  if (interrupt.payload?.type === 'mcp_auth_required') {
+    return interrupt.payload;
+  }
+  const raw = interrupt.value;
+  if (typeof raw === 'object' && raw !== null && (raw as { type?: string }).type === 'mcp_auth_required') {
+    return raw as unknown as NonNullable<InterruptInfo['payload']>;
+  }
+  if (typeof raw !== 'string') return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      parsed
+      && typeof parsed === 'object'
+      && (parsed as { type?: string }).type === 'mcp_auth_required'
+    ) {
+      return parsed as InterruptInfo['payload'];
+    }
+  } catch {
+    // not JSON — fall through
+  }
+  return null;
+}
+
+export function InterruptBanner({ interrupt, onResume, onDismiss }: InterruptBannerProps) {
+  const { t } = useTranslation();
+  const [response, setResponse] = useState('');
+  const [oauthReady, setOauthReady] = useState(false);
+
+  const mcpAuth = parseMcpAuthPayload(interrupt);
+
+  // Only to keep the row honest, never to act.
+  //
+  // This used to resume the paused run the moment the connection
+  // verified — polled every two seconds, and also driven by a
+  // `postMessage` from the OAuth callback page and by window focus.
+  // Connecting then restarted the answer on its own, which is the
+  // mid-chat authentication flow we are removing. The reader
+  // connects in Settings and asks again; all this does now is stop
+  // the banner insisting an integration is disconnected after they
+  // have connected it.
+  useEffect(() => {
+    if (!mcpAuth || oauthReady) return undefined;
+    const check = () => {
+      void verifyMcpOAuthConnected(mcpAuth.mcp_name).then((connected) => {
+        if (connected) setOauthReady(true);
+      });
+    };
+    check();
+    const onFocus = () => check();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [mcpAuth, oauthReady]);
+
+  // Connected since the run paused — from Settings, or another tab.
+  // Nothing here is worth saying any more, and the paused run is not
+  // resumed from this banner, so it simply goes.
+  if (mcpAuth && oauthReady) return null;
+
+  if (mcpAuth) {
+    return (
+      <div className="w-full space-y-0 animate-fadeInUpSmooth">
+        <div className="flex items-start gap-3">
+          <div className="w-8 h-8 rounded-full bg-muted flex items-center justify-center shrink-0 mt-0.5">
+            <Bot className="w-4 h-4 text-muted-foreground" />
+          </div>
+          <div className="flex-1 min-w-0">
+            {/* The same component the inline prompt uses. Two
+                renderings of one event is how the reader ends up
+                thinking they are two different problems. */}
+            <McpConnectRow mcpNames={[mcpAuth.mcp_name]} reason={mcpAuth.reason} />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const valueStr = interruptValueAsString(interrupt.value);
+  const approval = isToolApproval(valueStr);
+
+  if (approval) {
+    const risk = approvalRisk(valueStr);
+    return (
+      <div className="mx-4 mb-3" role="alert">
+        <Alert
+          variant={risk === 'high' ? 'danger' : 'warning'}
+          title={risk === 'high' ? 'High-risk action — review carefully' : 'Action Required'}
+          isInline
+          actionClose={<AlertActionCloseButton onClose={onDismiss} />}
+        >
+          <p className="text-sm mb-3 whitespace-pre-wrap">
+            {stripRiskMarker(valueStr)}
+          </p>
+          <div className="flex items-center gap-2">
+            {/* A destructive action should not have the affirmative
+                button styled as the obvious default. */}
+            <Button
+              variant={risk === 'high' ? 'secondary' : 'primary'}
+              size="sm"
+              icon={<CheckCircle className="w-3.5 h-3.5" />}
+              onClick={() => onResume('approved')}
+            >
+              {t('chat.approve')}
+            </Button>
+            <Button
+              variant="danger"
+              size="sm"
+              icon={<XCircle className="w-3.5 h-3.5" />}
+              onClick={() => onResume('rejected')}
+            >
+              {t('chat.reject')}
+            </Button>
+          </div>
+        </Alert>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mx-4 mb-3" role="alert">
+      <Alert
+        title={t('interrupt.title')}
+        isInline
+        actionClose={<AlertActionCloseButton onClose={onDismiss} />}
+      >
+        <p className="text-sm mb-3 whitespace-pre-wrap">{valueStr}</p>
+        <div className="flex items-center gap-2">
+          <TextInput
+            value={response}
+            onChange={(_e, val) => setResponse(val)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && response.trim()) onResume(response.trim());
+            }}
+            placeholder={t('interrupt.placeholder')}
+            aria-label={t('interrupt.response')}
+            className="flex-1"
+          />
+          <Button
+            variant="primary"
+            size="sm"
+            isDisabled={!response.trim()}
+            onClick={() => onResume(response.trim())}
+          >
+            {t('common.send')}
+          </Button>
+        </div>
+      </Alert>
+    </div>
+  );
+}

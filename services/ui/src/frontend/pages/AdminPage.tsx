@@ -1,0 +1,244 @@
+import { useCallback, useEffect, useState } from 'react';
+import { useAppDispatch } from '../redux/hooks';
+import { useRefreshableToken } from '../hooks/useRefreshableToken';
+import { loadConfig } from '../redux/slices/config';
+import { useTranslation } from 'react-i18next';
+import { Alert, Switch } from '@patternfly/react-core';
+import { Loader2, SlidersHorizontal } from 'lucide-react';
+
+import { whereFrom, type FeatureFlag, type FlagChange } from '../lib/feature-provenance';
+
+/** BFF route, not the agent proxy — same shape as config.service. */
+function adminApi(path: string): string {
+  const basePath = (window.APP_DATA?.basePath || '').replace(/\/$/, '');
+  return `${basePath}/api/admin${path}`;
+}
+
+interface FeatureState {
+  features: Record<string, boolean>;
+  overridable: string[];
+  /** Every declared flag, with the level that decided it. */
+  declared?: FeatureFlag[];
+  /** Who changed what recently, newest first. */
+  changes?: FlagChange[];
+}
+
+/**
+ * Deployment-wide switches, changeable here.
+ *
+ * Not in Settings, because Settings is per-user preference and these
+ * are not: every switch changes what *everybody* sees. Putting them
+ * among personal preferences invites someone to flip one thinking it
+ * applies to their own account.
+ *
+ * Values are stored server-side in Redis over the top of
+ * `config/ui/settings.yaml`. A per-browser toggle could not do this
+ * — it would change what the operator flipping it sees and nobody
+ * else.
+ */
+/** See AnalyticsPage for why `embedded` exists. */
+export function AdminPage({ embedded = false }: { embedded?: boolean } = {}) {
+  const { t } = useTranslation();
+  const dispatch = useAppDispatch();
+  // Sent so the agent can authorise this caller the same way it
+  // authorises CI. With auth off there is no token and the agent
+  // says the dev user is the operator.
+  const { token } = useRefreshableToken();
+  const [state, setState] = useState<FeatureState | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async (isStale: () => boolean = () => false) => {
+    try {
+      const res = await fetch(adminApi('/features'), {
+        cache: 'no-store',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      if (res.status === 403) throw new Error(t('admin.forbidden'));
+      if (!res.ok) throw new Error(`${t('admin.loadFailed')} (${res.status})`);
+      const body = await res.json();
+      if (isStale()) return;
+      setState(body);
+      setError(null);
+    } catch (e) {
+      if (isStale()) return;
+      setError(e instanceof Error ? e.message : t('admin.loadFailed'));
+    } finally {
+      if (!isStale()) setLoading(false);
+    }
+  }, [t, token]);
+
+  useEffect(() => {
+    // Guarded, because `load` is rebuilt on every token refresh and
+    // this effect runs again with it. An in-flight GET that lands
+    // after a PUT would otherwise overwrite the newer result with
+    // the older flags.
+    let cancelled = false;
+    void load(() => cancelled);
+    return () => {
+      cancelled = true;
+    };
+  }, [load]);
+
+  const toggle = async (key: string, next: boolean) => {
+    setSaving(key);
+    setError(null);
+    try {
+      const res = await fetch(adminApi('/features'), {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ [key]: next }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        // `detail` is the shared key; `error` is this server's older
+        // one, still sent alongside it.
+        throw new Error(
+          body?.detail ?? body?.error ?? `${t('admin.saveFailed')} (${res.status})`,
+        );
+      }
+      const body = await res.json();
+      setState((prev) => (prev ? { ...prev, features: body.features } : prev));
+      // The tabs read `state.config.features`, which was loaded once
+      // at startup. Without this the switch writes to Redis, the
+      // server agrees, and the UI keeps showing the old answer until
+      // somebody reloads the page.
+      void dispatch(loadConfig());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : t('admin.saveFailed'));
+      // Reload rather than keep an optimistic value that did not
+      // stick — a switch showing the wrong state is worse than a
+      // slow one.
+      await load();
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  return (
+    <div className={embedded ? '' : 'flex-1 overflow-y-auto px-6 py-6'}>
+      <div className={embedded ? '' : 'mx-auto max-w-3xl'}>
+        {!embedded && (
+        <header className="mb-6">
+          <h1 className="flex items-center gap-2 text-2xl font-semibold text-foreground">
+            <SlidersHorizontal className="h-5 w-5" aria-hidden="true" />
+            {t('admin.title')}
+          </h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {t('admin.subtitle')}
+          </p>
+        </header>
+        )}
+        {embedded && (
+          <p className="mb-4 text-sm text-muted-foreground">
+            {t('admin.subtitle')}
+          </p>
+        )}
+
+        {error && <Alert variant="danger" isInline title={error} className="mb-4" />}
+
+        {loading ? (
+          <p className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+            {t('common.loading')}
+          </p>
+        ) : !state ? null : (
+          <ul className="list-none space-y-2 p-0" aria-label={t('admin.title')}>
+            {state.overridable.map((key) => {
+              const on = state.features[key] !== false;
+              // Copy lives in the locale files, keyed on the flag
+              // name. An unknown flag falls back to its key rather
+              // than rendering a missing-translation marker — the
+              // allowlist is server-side, so the UI can meet a flag
+              // it has no copy for.
+              const meta = {
+                title: t(`admin.flags.${key}.title`, { defaultValue: key }),
+                detail: t(`admin.flags.${key}.detail`, { defaultValue: '' }),
+              };
+              return (
+                <li
+                  key={key}
+                  className="flex items-start justify-between gap-4 rounded-xl border border-border bg-card p-4"
+                >
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium text-foreground">
+                      {meta.title}
+                    </p>
+                    {meta.detail && (
+                      <p className="mt-0.5 text-sm text-muted-foreground">
+                        {meta.detail}
+                      </p>
+                    )}
+                  </div>
+                  <span className="shrink-0 pt-0.5">
+                    {saving === key ? (
+                      <Loader2
+                        className="h-4 w-4 animate-spin text-muted-foreground"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <Switch
+                        id={`flag-${key}`}
+                        aria-label={meta.title}
+                        isChecked={on}
+                        onChange={(_e, next) => void toggle(key, next)}
+                      />
+                    )}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
+        {/* The ones no switch here can change. Without them an
+            operator cannot tell whether sign-in is on, nor where it
+            was decided — and a missing switch looks like an
+            oversight rather than a decision made elsewhere. */}
+        {(state?.declared ?? []).filter((flag) => !flag.overridable).length > 0 && (
+          <div className="mt-6">
+            <h3 className="text-xs font-semibold text-foreground">{t('admin.setElsewhere')}</h3>
+            <ul className="list-none space-y-2 p-0 pt-2">
+              {(state?.declared ?? [])
+                .filter((flag) => !flag.overridable)
+                .map((flag) => (
+                  <li
+                    key={flag.key}
+                    className="rounded-xl border border-border bg-card p-3"
+                  >
+                    <code className="text-sm text-foreground">{flag.key}</code>
+                    <p className="text-xs text-muted-foreground">{flag.effect}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {flag.value ? 'On' : 'Off'} · {whereFrom(flag)}
+                    </p>
+                  </li>
+                ))}
+            </ul>
+          </div>
+        )}
+
+        {(state?.changes ?? []).length > 0 && (
+          <div className="mt-6">
+            <h3 className="text-xs font-semibold text-foreground">{t('admin.recentChanges')}</h3>
+            <ul className="list-none space-y-1 p-0 pt-2">
+              {(state?.changes ?? []).map((change) => (
+                <li
+                  key={`${change.key}-${change.when}`}
+                  className="text-xs text-muted-foreground"
+                >
+                  <code className="text-foreground">{change.key}</code> turned{' '}
+                  {change.to ? 'on' : 'off'} by {change.who} ·{' '}
+                  {new Date(change.when).toLocaleString()}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

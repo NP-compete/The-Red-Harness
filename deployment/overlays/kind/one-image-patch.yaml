@@ -1,0 +1,80 @@
+# One image, one tag, both Deployments (E10 strand D, T20).
+#
+# Until this, the agent ran `template-agent:local` and the
+# interface ran `template-ui:local`, and nothing stopped a cluster
+# holding version 7 of one against version 6 of the other — the
+# mismatch the shared version was meant to make impossible. Both
+# now name `harness:local` and differ only in the role they are
+# given: `agent` or `ui`.
+#
+# The role is `args`, not a second image and not a baked-in
+# command: the entrypoint is `harness`, and which half of the
+# product a pod is comes from the Deployment that scheduled it.
+#
+# Production still runs two Deployments, one process per
+# container, so probes, signals and the per-pod in-flight gauge
+# keep working exactly as they did.
+#
+# **Kind runs one.** There is no `ui` Deployment in this overlay
+# any more — the agent pod serves `all`, and the patch that used
+# to give the interface its own container went with it. What is
+# left here is the image name, which is the part that was ever
+# the point: one image, one tag, whatever roles it is asked for.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: wait-for-config
+          image: localhost/harness:local
+      containers:
+        - name: agent
+          image: localhost/harness:local
+          # One container, both roles. `all` supervises `agent` and
+          # `ui` as children and the first to exit takes the other
+          # down — so this pod cannot pass its probe while serving
+          # half the product. Production overrides this back to a
+          # single role per container.
+          args: ["all"]
+          ports:
+            - containerPort: 5002
+            - containerPort: 8080
+              name: ui
+          # What the interface needs, which it used to get from a
+          # Deployment of its own. `UIENV_` is stripped by the
+          # supervisor for the UI child only: `AGENT_HOST` is the
+          # agent's bind address and the interface's URL for
+          # reaching the agent, and `PORT` is generic enough to
+          # catch anything. Everything without the prefix is
+          # genuinely shared.
+          env:
+            # Authorization through OPA, which `harness all` reads to
+            # decide whether to start the policy engine beside the
+            # agent. The same variable is the documented override for
+            # `opa.enabled` in agent.yaml, so one switch turns on both
+            # the server and the agent's use of it.
+            - name: OPA_ENABLED
+              value: "true"
+            - name: UIENV_PORT
+              value: "8080"
+            - name: UIENV_AGENT_HOST
+              value: "http://agent:5002"
+            - name: AUTH_ENABLED
+              value: "false"
+            # Where the config PVC is *already* mounted in this
+            # pod, not the `/etc/config` the interface's own
+            # Deployment used to mount it at. One container means
+            # one mount, and the file is the same file.
+            - name: UI_CONFIG_PATH
+              value: "/app/config/agent/runtime/ui.yaml"
+            # Required by the UI server, which refuses to start
+            # without 32 characters. A fixed literal is correct
+            # here and only here: Kind is throwaway, the cookies
+            # never leave the laptop, and a generated value would
+            # invalidate every session on each redeploy. The
+            # OpenShift overlay takes this from a Secret.
+            - name: COOKIE_SIGN
+              value: "kind-local-development-cookie-signing-key"

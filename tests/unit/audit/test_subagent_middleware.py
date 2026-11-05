@@ -1,0 +1,110 @@
+"""Unit tests for audit middleware on subagents."""
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from agent.src.audit.middleware import AuditMiddleware
+from agent.src.infrastructure.subagents import _subagent_middleware
+
+
+@pytest.fixture(autouse=True)
+def _no_per_tool_limits():
+    """These tests are about audit/OPA/fallback composition."""
+    resolved = MagicMock()
+    resolved.tool_call_limit.per_tool = {}
+    with (
+        patch(
+            "agent.src.infrastructure.subagents.agent_config.resolve_agent_middleware",
+            return_value=resolved,
+        ),
+        patch(
+            "agent.src.infrastructure.subagents._profile_excluded_tools",
+            return_value=[],
+        ),
+    ):
+        yield
+
+
+class TestSubagentMiddleware:
+    @pytest.fixture(autouse=True)
+    def _no_user_identity_middleware(self):
+        with patch(
+            "agent.src.infrastructure.subagents.build_user_identity_middleware",
+            return_value=None,
+        ):
+            yield
+
+    @pytest.fixture(autouse=True)
+    def _no_current_datetime_middleware(self):
+        with patch(
+            "agent.src.infrastructure.subagents.build_current_datetime_middleware",
+            return_value=None,
+        ):
+            yield
+
+    def test_includes_audit_when_enabled(self):
+        tool = MagicMock()
+        tool.name = "mcp_search"
+        audit_mw = AuditMiddleware(
+            mcp_tool_names=frozenset({"mcp_search"}),
+            agent="researcher",
+        )
+        with (
+            patch(
+                "agent.src.infrastructure.subagents.build_audit_middleware",
+                return_value=audit_mw,
+            ),
+            patch(
+                "agent.src.infrastructure.subagents.build_opa_middleware",
+                return_value=None,
+            ),
+        ):
+            result = _subagent_middleware("researcher", [tool], [])
+        assert result is not None
+        assert isinstance(result[0], AuditMiddleware)
+        assert result[0]._agent == "researcher"
+        assert "mcp_search" in result[0]._mcp_tool_names
+
+    def test_returns_none_when_audit_and_opa_disabled_and_no_fallback(self):
+        with (
+            patch(
+                "agent.src.infrastructure.subagents.build_audit_middleware",
+                return_value=None,
+            ),
+            patch(
+                "agent.src.infrastructure.subagents.build_opa_middleware",
+                return_value=None,
+            ),
+        ):
+            assert _subagent_middleware("researcher", [], []) is None
+
+    def test_includes_opa_when_enabled(self):
+        opa_mw = MagicMock(name="OPAMiddleware")
+        with (
+            patch(
+                "agent.src.infrastructure.subagents.build_audit_middleware",
+                return_value=None,
+            ),
+            patch(
+                "agent.src.infrastructure.subagents.build_opa_middleware",
+                return_value=opa_mw,
+            ),
+        ):
+            result = _subagent_middleware("researcher", [], [])
+        assert result == [opa_mw]
+
+    def test_fallback_only_when_audit_disabled(self):
+        fallback = MagicMock()
+        with (
+            patch(
+                "agent.src.infrastructure.subagents.build_audit_middleware",
+                return_value=None,
+            ),
+            patch(
+                "agent.src.infrastructure.subagents.build_opa_middleware",
+                return_value=None,
+            ),
+        ):
+            result = _subagent_middleware("researcher", [], [fallback])
+        assert result == [fallback]

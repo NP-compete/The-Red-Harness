@@ -1,0 +1,19 @@
+# Tests allowed to be flaky, for a while (E26-T11).
+#
+# Three fields are required and the build fails without them: the
+# test's node id, who is fixing it, and the date they expect to be
+# done. An expired entry fails the build — the quarantine cannot
+# renew itself, so at the deadline somebody either fixes the test
+# or says out loud that it is being extended.
+#
+# One test per entry. No patterns: a pattern quarantines a
+# directory, which is the thing this exists to prevent.
+#
+#   quarantined:
+#     - test: tests/unit/foo/test_bar.py::TestBaz::test_sometimes
+#       owner: ada
+#       until: 2026-11-30
+#       reason: races with the Redis fixture about one run in fifty
+#
+# Empty, and that is the intended state.
+quarantined: []

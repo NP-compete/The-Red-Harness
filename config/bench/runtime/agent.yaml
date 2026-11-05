@@ -1,0 +1,33 @@
+# Measuring this agent, in a tree of its own.
+#
+# Separate from the tree that does the work, and selected by
+# CONFIG_PATH rather than by a flag, so that a benchmark run
+# cannot alter what a deployment loads. The property that
+# matters here is not that this tree is right — it is that the
+# other one is untouched by it.
+
+schema_version: 3
+
+# Named differently on purpose. A trace, a log line or a
+# dashboard should say which tree produced it without anybody
+# having to work it out.
+name: "Workpilot (measurement)"
+
+# A suite is thousands of tool calls written by somebody who was
+# not thinking about your systems. Nothing here reaches anything
+# real, and the runner refuses to start if this is not dry_run.
+execution:
+  effects: dry_run
+
+bench:
+  # Never true in a deployed pod. On is something somebody turns
+  # on for a run, not a state a tree sits in.
+  enabled: false
+  suites: [jb, lab, wbb]
+  # Empty means the agent's own configured model. Naming one
+  # here would quietly measure a different model from the
+  # configuration under test.
+  model: ""
+  parallel: 4
+  results_path: data/bench/results.jsonl
+  timeout_seconds: 900

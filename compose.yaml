@@ -1,0 +1,185 @@
+## Agent compose stack — agent + dependencies only (no MCP, no UI)
+##
+##   make dev      - pgvector + redis in compose; agent process on host
+##   make container  - pgvector + redis + agent in compose
+##   make dev        - same as container, detached + log tail
+##
+## MCP and UI run from their own repos (template-mcp-server, template-ui).
+##
+## Demo profile:   Adds UI + MCP Server with SSO authentication
+##   make demo          - Clone repos, configure, start full stack
+##   make clean         - Stop stack, remove data + cloned repos
+##
+## Observability profile:  Adds Jaeger (also enabled by `make container`)
+##   docker compose --profile observability up
+##   Set ENABLE_OTEL=true in .env to enable metrics/tracing export
+##
+## Services (always):
+##   pgvector              - Postgres (agent checkpoints)
+##   redis                 - Aegra broker (SSE streaming, job queue)
+##   template-agent        - Agent (port 5002)
+##
+## Services (demo profile):
+##   template-mcp-server   - MCP server with SSO auth (port 5001)
+##   template-ui           - React/Fastify frontend with SSO auth (port 8080)
+##
+## Services (observability profile):
+##   jaeger                - Jaeger UI for trace visualization (UI :16686)
+
+services:
+  pgvector:
+    # Named in config/agent/deployment/values.yaml; `make
+    # datastore-check` fails when this drifts. It was
+    # `ankane/pgvector` — no tag, so whatever the registry
+    # served that morning, against pg16 in Kubernetes.
+    image: pgvector/pgvector:pg16
+    container_name: template-agent-pgvector
+    environment:
+      POSTGRES_DB: template_agent
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - agent_pgvector_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d template_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - agent-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: template-agent-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - agent_redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - agent-network
+
+  opa:
+    # Upstream OPA, policies mounted from the config tree.
+    #
+    # Was a custom image of ours that git-cloned policies from a
+    # repo and hot-reloaded them. That repo was never configured
+    # (OPA_POLICY_GIT_REPO was ""), so the sync never ran, and it
+    # cost a second image to build, scan and patch, a private
+    # registry Kind could not pull from, and a second source of
+    # truth for the five .rego files already in config/.
+    image: openpolicyagent/opa:1.20.1
+    container_name: template-agent-opa
+    command:
+      - run
+      - --server
+      - --addr=0.0.0.0:8181
+      - --log-format=json
+      - /policies
+    ports:
+      - "127.0.0.1:8181:8181"
+    volumes:
+      - ./config/agent/compliance/policies:/policies:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "/opa", "eval", "true"]
+      interval: 10s
+      timeout: 3s
+  template-agent:
+    profiles: [container, observability]
+    build:
+      context: .
+      # The one image, both halves. `Containerfile` builds the
+      # agent alone; this is the artifact Kind and production run.
+      dockerfile: Containerfile
+      target: runtime
+    # Both roles in one container, as Kind does. `all` supervises
+    # the agent and the interface and the first to exit takes the
+    # other down, so this cannot serve half the product.
+    command: ["all"]
+    container_name: template-agent
+    extra_hosts:
+      - "host.containers.internal:host-gateway"
+    ports:
+      - "5002:5002"
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - ENABLE_AUTH=true
+      - POSTGRES_HOST=pgvector
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=template_agent
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_BROKER_ENABLED=true
+      # Custom CA — mount a PEM at ./certs/ca.pem to trust corporate CAs
+      - CUSTOM_CA_PATH=${CUSTOM_CA_PATH:-/etc/custom-ca/ca.pem}
+      # OTEL (enable via env — make container sets these when Jaeger profile is active)
+      - ENABLE_OTEL=${ENABLE_OTEL:-false}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4317}
+      - ENABLE_OTEL_TRACES=${ENABLE_OTEL_TRACES:-false}
+      - OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-http://jaeger:4317}
+      # Eval runner — service name resolves correctly on the shared container network
+    depends_on:
+      pgvector:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opa:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://0.0.0.0:5002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    volumes:
+      - ./agent:/app/agent:ro
+      - ./config:/app/config:ro
+      - ${CUSTOM_CA_FILE:-/dev/null}:/etc/custom-ca/ca.pem:ro
+      # Uploads publish into DATA_PATH, which defaults to /app/data. Without a
+      # volume here they land on the container filesystem and vanish on the
+      # next restart, while POST /upload still returns 200.
+      - agent_upload_data:/app/data
+    networks:
+      - agent-network
+
+  # ── Observability Stack ──────────────────────────────────────────────
+
+  jaeger:
+    profiles: [observability]
+    image: jaegertracing/all-in-one:1.55
+    container_name: demo-jaeger
+    ports:
+      - "16686:16686"  # Jaeger UI
+      - "4317"         # OTLP gRPC receiver (internal only)
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    restart: unless-stopped
+    networks:
+      - agent-network
+
+volumes:
+  agent_upload_data:
+    driver: local
+  agent_pgvector_data:
+    driver: local
+  agent_redis_data:
+    driver: local
+
+networks:
+  agent-network:
+    driver: bridge
