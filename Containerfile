@@ -146,6 +146,11 @@ RUN uv pip install --python /app/.venv/bin/python \
 # excuse anything above it.
 RUN find /app/.venv -name '*.so' -exec strip --strip-unneeded {} + 2>/dev/null || true
 
+# One stage whose only job is to resolve the build arg to a name
+# `--from` will accept.
+ARG VENV_STAGE
+FROM ${VENV_STAGE} AS venv
+
 # ── runtime — the image that serves either role ────────────────
 FROM registry.access.redhat.com/hi/python:${PYTHON_RUNTIME_TAG} AS runtime
 
@@ -167,8 +172,13 @@ ENV UV_NO_CACHE=1
 # `--build-arg VENV_STAGE=deps-slim` → no spaCy, no presidio. One
 # runtime stage either way; duplicating it for one COPY is how the
 # two drift apart.
-ARG VENV_STAGE
-COPY --from=${VENV_STAGE} /app/.venv /app/.venv
+#
+# The selection goes through the `venv` stage above rather than
+# `COPY --from=${VENV_STAGE}` directly: buildkit refuses a variable
+# there — "variable expansion is not supported for --from, define a
+# new stage" — so the image built under podman and had never built
+# in CI. `FROM ${ARG}` is expanded, `--from=${ARG}` is not.
+COPY --from=venv /app/.venv /app/.venv
 
 # `/app/data` group-writable and group 0, which is what the
 # restricted SCC requires (DEP-1). It used to be created

@@ -11,8 +11,8 @@ on:
       # The interface's dependencies live here since the
       # merge; its own license scan watched these and this
       # one did not know the files existed.
-      - 'ui/package.json'
-      - 'ui/package-lock.json'
+      - 'services/ui/package.json'
+      - 'services/ui/package-lock.json'
   pull_request:
     branches: [main, deep-agent]
     paths:
@@ -23,8 +23,8 @@ on:
       # The interface's dependencies live here since the
       # merge; its own license scan watched these and this
       # one did not know the files existed.
-      - 'ui/package.json'
-      - 'ui/package-lock.json'
+      - 'services/ui/package.json'
+      - 'services/ui/package-lock.json'
 
 permissions:
   contents: read

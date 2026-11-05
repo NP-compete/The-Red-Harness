@@ -33,8 +33,15 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      # Only when deploying. On a pull request this asked GitHub for a
+      # Pages site that does not exist yet and failed the check with
+      # "Get Pages site failed" — turning "the docs still build" into
+      # a red cross about repository settings. Enabling Pages is a
+      # deliberate act (Settings -> Pages -> Source -> GitHub Actions),
+      # not something CI should do on the way past.
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
         id: pages
+        if: github.event_name != 'pull_request'
 
       - uses: actions/jekyll-build-pages@44a6e6beabd48582f863aeeb6cb2151cc1716697 # v1
         with:
@@ -42,6 +49,7 @@ jobs:
           destination: ./_site
 
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        if: github.event_name != 'pull_request'
 
   deploy:
     name: Deploy
