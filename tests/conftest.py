@@ -13,6 +13,31 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 
+def _the_suite_does_not_read_dotenv() -> None:
+    """Make `.env` invisible to the tests, the way it is to CI.
+
+    `agent.src.settings` calls `load_dotenv()` at import. On a laptop
+    that file exists and sets `ENABLE_AUTH=false`, a Fernet key and a
+    service-account credential; on a runner it is gitignored and
+    absent. So the suite was reading configuration the pipeline would
+    never have, and "passes locally, 401 in CI" turned up in four
+    separate files before anybody looked for the cause rather than
+    the symptom.
+
+    Patched here rather than deleted there, because `load_dotenv()`
+    is right for `make dev` — it is only wrong for a test. Real
+    environment variables still win, so a deliberate
+    `ENABLE_AUTH=1 pytest` keeps working.
+    """
+    import dotenv
+
+    dotenv.load_dotenv = lambda *a, **k: False  # type: ignore[assignment]
+    dotenv.main.load_dotenv = lambda *a, **k: False  # type: ignore[assignment]
+
+
+_the_suite_does_not_read_dotenv()
+
+
 def _import_everything_that_reads_settings_at_import_time() -> None:
     """Import, once and early, every module that reads `settings`.
 

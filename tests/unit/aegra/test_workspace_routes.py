@@ -19,6 +19,21 @@ def item(key: str, content: str, created: str = "2026-10-27T17:00:00+00:00"):
     )
 
 
+@pytest.fixture(autouse=True)
+def _auth_off_on_purpose():
+    """Off explicitly, not by inheritance.
+
+    These routes take a caller; who it is, is mocked below. Whether
+    there is one came from a developer's `.env` setting
+    `ENABLE_AUTH=false`, so twenty-one of these answered on a laptop
+    and raised 401 in the pipeline. The suite no longer reads
+    `.env` — see `tests/conftest.py` — so the dependency has to be
+    stated where it is relied on.
+    """
+    with patch("agent.aegra.auth.ENABLE_AUTH", False):
+        yield
+
+
 @pytest.fixture
 def listing(monkeypatch):
     monkeypatch.setattr(workspace_routes, "_store_route", lambda: "")

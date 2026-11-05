@@ -55,6 +55,17 @@ REDIS = "redis:7-alpine"
 #: `pre-commit` wants a repository to enumerate files from; without
 #: the history both pass by having nothing to look at.
 IGNORE = [
+    # `.env` first, and for a different reason from the rest. It is
+    # gitignored, so a runner's checkout has none — but a laptop's
+    # working tree does, and Dagger uploads the host directory, not
+    # the commit. So every local run was handing its containers a
+    # developer's real `.env`: a Fernet key, a service-account
+    # private key, `ENABLE_AUTH=false`. That is both a secret in a
+    # container that did not need one and the reason "it passes
+    # locally" kept meaning nothing — the agent and the interface
+    # were reading configuration the pipeline would never have.
+    ".env",
+    "**/.env",
     "**/.venv",
     "**/node_modules",
     "**/dist",
@@ -676,6 +687,15 @@ class Harness:
         """
         agent = (
             self.datastores(self.base(source))
+            # The agent refuses to start without this when any MCP
+            # server stores tokens, which eight of them do. A fixed
+            # value: these tests seal nothing anybody reads, and a
+            # generated one would make the container's cache key
+            # change on every run.
+            .with_env_variable(
+                "MCP_TOKEN_ENCRYPTION_KEY",
+                "Zm9yLXRoZS1pbnRlZ3JhdGlvbi10aWVyLW9ubHktMzJiPQ==",
+            )
             .with_exposed_port(5002)
             # `--host 0.0.0.0`, which is not the default. `aegra dev`
             # binds 127.0.0.1, a service binding reaches the container
