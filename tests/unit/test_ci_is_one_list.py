@@ -35,11 +35,16 @@ def test_every_job_names_a_check_or_a_target():
     is neither is not.
     """
     targets = set(re.findall(r"^([a-z][a-z0-9-]*):", MAKEFILE.read_text(), re.M))
-    checks = set(_dagger_checks())
+    # A job is legitimate if it is a Makefile target, an entry in
+    # CHECKS, or a `@function` in the module — `test` and `ui` are
+    # functions rather than CHECKS entries, and listing `ui` without
+    # this failed here, which is the test doing its job.
     stray = [
         job
         for job in _jobs()
-        if job not in targets and job not in checks and job != "test"
+        if job not in targets
+        and job not in set(_dagger_checks())
+        and job not in _dagger_functions()
     ]
     assert stray == [], f"`make ci-jobs` names {stray}, which is neither"
 
@@ -56,6 +61,22 @@ def _dagger_checks() -> list[str]:
         ):
             return sorted(ast.literal_eval(node.value))
     raise AssertionError("no CHECKS table")
+
+
+def _dagger_functions() -> set[str]:
+    """Names decorated with `@function` in the pipeline module."""
+    import ast
+
+    tree = ast.parse((REPO / "ci" / "src" / "harness" / "main.py").read_text())
+    return {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            getattr(d, "id", getattr(d, "attr", "")) == "function"
+            for d in node.decorator_list
+        )
+    }
 
 
 def test_the_pipeline_runs_the_same_command_a_developer_runs():

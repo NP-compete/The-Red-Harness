@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
-import pytest
-from cryptography.fernet import Fernet
+import base64
 
+import pytest
 from agent.aegra.mcp_crypto import (
     McpKeyMissingError,
     encrypt_secret,
     reset_mcp_crypto_cache,
 )
+from cryptography.fernet import Fernet
 
-VALID = Fernet.generate_key().decode()
+# Deterministic, because it is a parametrize value: `generate_key()`
+# produced a different id in every process, so `pytest -n` refused to
+# run with "Different tests were collected between gw0 and gw1". It
+# also meant a failure here could never be re-run.
+#
+# Built rather than pasted: a literal key would read as a credential
+# to the secret scanner, and this is plainly thirty-two zero bytes.
+VALID = base64.urlsafe_b64encode(bytes(32)).decode()
 
 
 @pytest.fixture(autouse=True)

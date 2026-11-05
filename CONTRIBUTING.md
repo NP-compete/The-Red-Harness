@@ -59,8 +59,8 @@ Replace `N` with the number of commits on your branch.
 3. Sign off every commit with `git commit -s`.
 4. Run checks locally before pushing:
    ```bash
-   pre-commit run --all-files
-   make test
+   make pre-commit
+   make ci
    ```
 5. Open a PR targeting `deep-agent`. Fill in the PR template.
 6. CI must pass (tests, pre-commit, vulnerability scan, DCO).
@@ -84,7 +84,9 @@ All of these run automatically on `git commit` if you ran `make install`.
 ```bash
 make test           # unit tests
 make test-cov       # with coverage report
-make test-all       # unit + skill evals
+make check NAME=x   # one pipeline check, in seconds
+make ci             # every check, the same ones CI runs
+make test-skills    # the skill evals — real model calls, costs money
 ```
 
 ## Security

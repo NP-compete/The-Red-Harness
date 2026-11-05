@@ -64,11 +64,17 @@ repos:
   # resolves to Any and `warn_return_any` fires on ~180 correct returns.
   # Checking against the real environment is the only way the results mean
   # anything. Config, including the paths, lives in `[tool.mypy]`.
+  #
+  # `.venv/bin/mypy`, not `mypy`: with `language: system` the entry is
+  # looked up on PATH, and mypy is installed in the project venv. Anyone
+  # who had not activated it got "Executable `mypy` not found" and an
+  # aborted commit — the hook that is meant to check the real
+  # environment could not find it.
   - repo: local
     hooks:
       - id: mypy
         name: mypy
-        entry: mypy
+        entry: .venv/bin/mypy
         language: system
         types: [python]
         pass_filenames: false

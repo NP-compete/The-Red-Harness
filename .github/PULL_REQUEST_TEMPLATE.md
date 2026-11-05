@@ -13,7 +13,7 @@ Fixes #
 <!-- How did you verify this works? -->
 
 - [ ] Unit tests added/updated
-- [ ] Ran locally (`uv run pytest tests/unit -x`)
+- [ ] Ran locally (`make test`) — `tests/unit` alone is no longer the suite
 - [ ] Manual verification (describe below if applicable)
 
 ## Rollback
@@ -25,4 +25,5 @@ Fixes #
 - [ ] PR title follows [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `ci:`, etc.)
 - [ ] No secrets, credentials, or PII in the diff
 - [ ] No breaking changes (or documented above with a migration path)
-- [ ] Pre-commit hooks pass (`uv run pre-commit run --all-files`)
+- [ ] Pre-commit hooks pass (`make pre-commit`)
+- [ ] Checks pass (`make ci`, or `make check NAME=<job>` for one)

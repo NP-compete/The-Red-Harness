@@ -60,9 +60,17 @@ def _spacings(marker: str) -> list[str]:
     ]
 
 
-@pytest.mark.parametrize(
-    "name,escape,marker,allowed", FENCES, ids=lambda v: str(v)[:28]
-)
+def _id(value: object) -> str:
+    """A stable id. `str()` of a function carries its address.
+
+    `<function _identity at 0x130…>` differs per process, so
+    `pytest -n` refused the whole suite with "Different tests were
+    collected between gw1 and gw14".
+    """
+    return str(getattr(value, "__name__", value))[:28]
+
+
+@pytest.mark.parametrize("name,escape,marker,allowed", FENCES, ids=_id)
 class TestAFenceCannotBeEndedFromInside:
     def test_no_spacing_gets_the_marker_through(self, name, escape, marker, allowed):
         pattern = re.compile(re.escape(marker), re.IGNORECASE)

@@ -75,7 +75,13 @@ test: ## The whole suite, except what needs a model or a cluster
 	@# of them failing, that nobody had seen. What needs a live
 	@# stack skips itself; `skills` and `nightly` are deselected
 	@# here and named in `ci-skipped`.
-	.venv/bin/python -m pytest tests -m "not skills and not nightly"
+	@# `-n auto`, which took the suite from 3m40s to 55s. Two things
+	@# had to be fixed first: a parametrize value built with
+	@# `Fernet.generate_key()` and another whose id was a function's
+	@# repr — both differ per process, and xdist refuses to run when
+	@# workers disagree about what they collected.
+	.venv/bin/python -m pytest tests -m "not skills and not nightly" \
+		-n $(PYTEST_WORKERS) --dist=loadfile
 
 #: The floor the suite must hold, as a ratchet. **Not the 68%
 #: TEST-2 names** — real coverage is 57%, so the pipeline's
@@ -119,8 +125,13 @@ test-all:
 		echo "Error: Virtual environment not found. Run 'make install' first to set up the environment."; \
 		exit 1; \
 	fi
-	@echo "Running all tests (unit + skills evals)..."
-	.venv/bin/python -m pytest
+	@# Bare `pytest` collects `testpaths = ["tests"]`, which
+	@# includes the `skills` marker — real model calls that cost
+	@# money. CONTRIBUTING advertised this target, so following the
+	@# documentation billed you. Named explicitly now.
+	@echo "Running the whole suite INCLUDING the paid skill evals..."
+	@echo "Ctrl-C now if you did not mean that; `make test` is the free one."
+	.venv/bin/python -m pytest tests
 
 test-skills:
 	@if [ ! -d ".venv" ]; then \
@@ -144,6 +155,10 @@ UI_DIR ?= services/ui
 #: written against in `ci/dagger.json`, and a CLI that disagrees
 #: refuses to load it.
 PY ?= python3
+
+#: Parallel test workers. `auto` is one per core; set 0 to
+#: disable when a failure needs a readable serial run.
+PYTEST_WORKERS ?= auto
 DAGGER_VERSION ?= v0.21.11
 DAGGER ?= $(CURDIR)/.local/bin/dagger
 DAGGER_PORT ?= 8080
@@ -697,6 +712,14 @@ help: ## List every target and what it does
 
 .PHONY: pre-commit
 ##@ Check
+.PHONY: check
+check: ## One pipeline check, in seconds: make check NAME=tautologies
+	@# `make ci` is nine minutes and all or nothing. Most changes
+	@# touch one area, and the pipeline can run one function.
+	@test -n "$(NAME)" || (echo "usage: make check NAME=<job>   (make ci-jobs lists them)" && exit 2)
+	@$(MAKE) --no-print-directory dagger-engine
+	@$(DAGGER) -m ci call check --name=$(NAME)
+
 pre-commit: ## Run the pre-commit hooks over the whole tree
 	@# A real target at last. `ci-jobs` has listed `pre-commit`
 	@# since the list was written and no rule existed, so the

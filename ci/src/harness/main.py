@@ -192,6 +192,11 @@ class Harness:
                     "-m",
                     "not skills and not nightly",
                     "-q",
+                    # The long pole: 6m38s of a 9m13s run. One worker
+                    # per core takes it to about a minute.
+                    "-n",
+                    "auto",
+                    "--dist=loadfile",
                 ]
             )
             .stdout()
