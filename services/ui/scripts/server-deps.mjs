@@ -78,6 +78,14 @@ const out = {
   dependencies: Object.fromEntries(
     [...used].sort().map((name) => [name, declared[name]])
   ),
+  // The overrides come too. This manifest is installed in the image
+  // with a plain `npm install` — no lockfile, nothing to pin a
+  // transitive dependency — so without them the image resolved
+  // `@opentelemetry/propagator-jaeger@2.7.1` while the repository's
+  // lock said 2.12.0, and the image scan reported a HIGH the
+  // interface had already fixed. An override that only applies to
+  // the tree nobody ships is not an override.
+  overrides: manifest.overrides ?? {},
 };
 
 const target = join(ROOT, "package.server.json");

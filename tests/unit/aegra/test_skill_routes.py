@@ -6,6 +6,22 @@ import pytest
 
 
 class TestSkillsReport:
+    @pytest.fixture(autouse=True)
+    def _auth_off_on_purpose(self):
+        """Off explicitly, not by inheritance.
+
+        `ENABLE_AUTH` defaults to true and a developer's `.env` turns
+        it off, so `whoami` with no Authorization header answered here
+        and raised 401 in the pipeline — two tests that agreed with
+        whoever ran them. Nothing in this file is about whether there
+        is a caller; `whoami` exists so another service can decide
+        what a caller may do.
+        """
+        from unittest.mock import patch
+
+        with patch("agent.aegra.auth.ENABLE_AUTH", False):
+            yield
+
     @pytest.mark.asyncio
     async def test_attached_skills_come_first(self):
         from agent.aegra.skill_routes import list_skills

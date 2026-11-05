@@ -17,3 +17,12 @@ CVE-2026-25087
 # Revisit when pip upstream updates its vendored copies.
 GHSA-6v7p-g79w-8964
 CVE-2025-47273
+
+# CVE-2026-112940: filelock arbitrary file overwrite via insecure
+# database file reopening (HIGH).
+# Fixed in filelock 4.2.1, and unreachable from here: litellm pins
+# `filelock>=3.16.1,<4.0` and still does as of 1.108.0, so uv cannot
+# resolve past 3.x while litellm is a dependency. filelock arrives
+# under litellm, presidio and pre-commit; nothing in this repository
+# calls it. Revisit when litellm relaxes the bound.
+CVE-2026-112940

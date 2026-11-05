@@ -295,6 +295,13 @@ class Harness:
                 "/src/tests/fixtures/openapi-baseline.json",
                 source.file("tests/fixtures/openapi-baseline.json"),
             )
+            # `every-check-is-run.test.ts` reads this module to check
+            # that the interface's checks are still gathered by `ci`.
+            # It used to read `.github/workflows/ui.yml`, which no
+            # longer exists; without the pipeline here it fails with
+            # ENOENT, which is the guard working and saying the wrong
+            # thing.
+            .with_directory("/src/ci/src", source.directory("ci/src"))
         )
 
     @function
@@ -349,15 +356,14 @@ class Harness:
         )
         return out
 
-    @function
-    async def e2e(self, source: Source) -> str:
-        """Playwright against the built BFF, in Playwright's own image.
+    def _e2e_container(self, source: Source) -> dagger.Container:
+        """Playwright's own image, with the built BFF in it.
 
         `config/` comes along because the server watches
         `config/agent/PROMPT.md` at boot.
         """
         ui = source.directory("services/ui")
-        out: str = await (
+        return (
             dag.container()
             .from_(PLAYWRIGHT)
             .with_mounted_cache("/root/.npm", dag.cache_volume("npm"))
@@ -371,10 +377,37 @@ class Harness:
             .with_directory("/src/services/ui/dist", self.ui_dist(source))
             .with_directory("/src/config", source.directory("config"))
             .with_env_variable("CI", "true")
-            .with_exec(["npx", "playwright", "test"])
-            .stdout()
         )
+
+    @function
+    async def e2e(self, source: Source) -> str:
+        """Playwright against the built BFF, in Playwright's own image."""
+        # Allowed to fail, so the report survives it. The old
+        # workflow uploaded `playwright-report/` with `if: always()`;
+        # a `with_exec` that raises takes its container with it, and
+        # a failing browser test you cannot look at is a failing test
+        # you cannot fix. Read the code, keep the report, then fail.
+        done = self._e2e_container(source).with_exec(
+            ["npx", "playwright", "test"], expect=dagger.ReturnType.ANY
+        )
+        code = await done.exit_code()
+        out: str = await done.stdout()
+        if code != 0:
+            raise RuntimeError(
+                f"{out}\n\nplaywright exited {code}. "
+                "`dagger -m ci call e2e-report export --path=playwright-report` "
+                "for the traces."
+            )
         return out
+
+    @function
+    def e2e_report(self, source: Source) -> dagger.Directory:
+        """The Playwright report, whether or not the run passed."""
+        return (
+            self._e2e_container(source)
+            .with_exec(["npx", "playwright", "test"], expect=dagger.ReturnType.ANY)
+            .directory("/src/services/ui/playwright-report")
+        )
 
     @function
     async def ui(self, source: Source) -> str:
@@ -467,10 +500,37 @@ class Harness:
                     "filesystem",
                     "--scanners",
                     "license",
+                    # A forbidden licence is HIGH or CRITICAL and
+                    # still fails. UNKNOWN is reported and does not:
+                    # every one of the twelve is trivy declining to
+                    # parse `SEE LICENSE IN LICENSE` on a package
+                    # whose licence file says MIT. That is trivy not
+                    # knowing, which is worth reading and is not a
+                    # licence violation — and `required-checks.yml`
+                    # already calls this check "a conversation rather
+                    # than a build failure".
                     "--severity",
-                    "UNKNOWN,HIGH,CRITICAL",
+                    "HIGH,CRITICAL",
                     "--exit-code",
                     "1",
+                    "--config",
+                    "trivy-license.yaml",
+                    ".",
+                ]
+            )
+            # The unclassified ones, named rather than dropped. A
+            # check that stops failing and stops reporting has not
+            # been made advisory, it has been deleted.
+            .with_exec(
+                [
+                    "trivy",
+                    "filesystem",
+                    "--scanners",
+                    "license",
+                    "--severity",
+                    "UNKNOWN",
+                    "--exit-code",
+                    "0",
                     "--config",
                     "trivy-license.yaml",
                     ".",
