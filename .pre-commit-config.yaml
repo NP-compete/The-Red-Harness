@@ -19,9 +19,9 @@ repos:
         # renders them. `make lint-chart` covers these instead.
         exclude: ^deployment/chart/templates/
       - id: check-added-large-files
-        # Lockfile and the generated OpenAPI baseline are both legitimately
-        # over the 500 KB default and both must stay in-tree.
-        exclude: ^(services/ui/package-lock\.json|tests/fixtures/openapi-baseline\.json)$
+        # The lockfiles and the generated OpenAPI baseline are all
+        # legitimately over the 500 KB default and all must stay in-tree.
+        exclude: ^(uv\.lock|services/ui/package-lock\.json|tests/fixtures/openapi-baseline\.json)$
       - id: check-merge-conflict
       - id: debug-statements
       - id: check-case-conflict

@@ -46,11 +46,19 @@ describe('the sweep is worth running', () => {
     expect(componentFiles().length).toBeGreaterThanOrEqual(400);
   });
 
-  it('is not matching everything in sight', () => {
-    // The other failure: a rule so loose that every file is a
-    // finding, which nobody can act on and everybody turns off.
-    expect(sweep().length).toBeLessThan(componentFiles().length);
-  });
+  // `sweep()` reads every component in the interface, and there are
+  // now some nine hundred of them. On a laptop that is a second; in
+  // the pipeline's container it is not, and the default five is how
+  // these two became the only red in a green run.
+  it(
+    'is not matching everything in sight',
+    () => {
+      // The other failure: a rule so loose that every file is a
+      // finding, which nobody can act on and everybody turns off.
+      expect(sweep().length).toBeLessThan(componentFiles().length);
+    },
+    60_000,
+  );
 });
 
 describe('what it counts as a string somebody reads', () => {
@@ -150,7 +158,7 @@ describe('the count', () => {
       `${findings.length} strings are written into components rather than the ` +
         `catalogue, up from ${CEILING}. The new ones are among:\n${where}`,
     ).toBeLessThanOrEqual(CEILING);
-  });
+  }, 60_000);
 });
 
 describe('a property name is read by its last segment', () => {

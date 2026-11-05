@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from agent.src.pii.config import PIIRule
 from agent.src.pii.detector import PIIMatch
 
@@ -16,6 +18,28 @@ _RULE_TO_ENTITY: dict[str, str] = {
 }
 
 
+_nlp_engine = None
+
+
+def _shared_nlp_engine() -> Any:
+    """The spaCy pipeline, loaded once for the process.
+
+    A bare `AnalyzerEngine()` loads its own, and a detector is built
+    per rule set — forty-three of them in one test file came to four
+    gigabytes resident, which is how an xdist worker was killed in
+    the pipeline with nothing to show but "worker crashed". Only the
+    model is shared; the recognizer registry stays per instance,
+    because custom rules are registered into it and one detector's
+    patterns have no business in another's.
+    """
+    global _nlp_engine
+    if _nlp_engine is None:
+        from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+        _nlp_engine = NlpEngineProvider().create_engine()
+    return _nlp_engine
+
+
 class PresidioDetector:
     """Detects PII using Presidio's AnalyzerEngine."""
 
@@ -26,7 +50,7 @@ class PresidioDetector:
         self._entities: list[str] = []
         self._entity_to_rule: dict[str, PIIRule] = {}
 
-        analyzer = AnalyzerEngine()
+        analyzer = AnalyzerEngine(nlp_engine=_shared_nlp_engine())
 
         supported = set(analyzer.get_supported_entities())
 

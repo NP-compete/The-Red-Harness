@@ -19,7 +19,7 @@ const PATTERNS: { kind: string; pattern: RegExp; minimum: number }[] = [
   { kind: 'bearer-token', pattern: /\bbearer\s+(\S+)/i, minimum: MIN_KEY },
   {
     kind: 'connection-string',
-    pattern: /\b[a-z][a-z0-9+.\-]*:\/\/[^\s:/@]+:([^\s:/@]+)@/,
+    pattern: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:([^\s:/@]+)@/,
     minimum: MIN_PASSWORD,
   },
   {

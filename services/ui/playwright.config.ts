@@ -59,6 +59,11 @@ export default defineConfig({
     url: 'http://localhost:18080',
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,
+    // Without these, a server that dies on boot is reported as
+    // "timed out waiting 30000ms" and nothing else — the stack
+    // trace that says why goes to a pipe nobody reads.
+    stdout: 'pipe',
+    stderr: 'pipe',
     env: {
       PORT: '18080',
       AUTH_ENABLED: 'false',

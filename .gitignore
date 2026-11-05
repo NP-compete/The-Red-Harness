@@ -194,7 +194,11 @@ build.log
 *.tmp
 *.bak
 .idea
-uv.lock
+# `uv.lock` was here, under "temporary project files". It is the
+# opposite of temporary: this is an application, not a library, and
+# the lock is the only record of which versions were tested. Ignored,
+# it was absent from the pipeline's checkout, where
+# `test_an_upgrade_is_its_own_change` noticed and nothing else did.
 bandit-report.json
 safety-report.json
 .safety-project.ini

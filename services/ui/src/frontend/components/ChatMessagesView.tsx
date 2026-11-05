@@ -1045,7 +1045,7 @@ export function ChatMessagesView({
   streamEvents = [],
   liveActivityEvents = [],
   stopping = false,
-  replyCutShort = false,
+  replyCutShort: _replyCutShort = false,
   isRateLimited = false,
   rateLimitRemainingSeconds = 0,
   mcpEvents = [],

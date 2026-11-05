@@ -473,6 +473,14 @@ CI_IMAGE := harness:ci
 #: Where the integration tier looks for a running agent.
 LANGGRAPH_API_URL ?= http://127.0.0.1:2024
 KIND_NS := template-agent
+
+# Where `ci-compose` looks for the datastores. The compose file
+# publishes both on localhost, and so does the pipeline's service
+# container block, so one default covers a laptop and a runner.
+PG_HOST ?= localhost
+PG_PORT ?= 5432
+REDIS_HOST ?= localhost
+REDIS_PORT ?= 6379
 KIND_DIR := .kind
 # Rootless podman cannot bind ports below 1024, so the ingress is published on
 # high ports. Everything the tests use goes through port-forward regardless.
@@ -843,8 +851,15 @@ ci-compose: ## The checks that need the compose datastores (E26-T15)
 	@# Postgres, Redis and OPA, which the unit suite deliberately
 	@# does without. These are the ones that would otherwise only
 	@# ever run in the pipeline.
-	@podman ps --format '{{.Names}}' | grep -q template-agent-pgvector || \
-		(echo "The compose datastores are not up. 'podman compose up -d' or 'make dev'." && exit 2)
+	@# Probed by connecting, not by asking podman for a container
+	@# name. In the pipeline these are the job's service containers
+	@# and there is no podman to ask, so the name check reported
+	@# "not up" against datastores that were listening — a guard
+	@# that tests the mechanism instead of the thing it needs.
+	@python3 -c "import socket; \
+[socket.create_connection((h, p), 5).close() for h, p in \
+ (('$(PG_HOST)', $(PG_PORT)), ('$(REDIS_HOST)', $(REDIS_PORT)))]" 2>/dev/null || \
+		(echo "No Postgres on $(PG_HOST):$(PG_PORT) or Redis on $(REDIS_HOST):$(REDIS_PORT). 'podman compose up -d' or 'make dev'." && exit 2)
 	@# `|| echo` here once turned 14 failing tests into the line
 	@# "nothing to run against the datastores", which is the most
 	@# comfortable wrong answer available. Absent, skipped and

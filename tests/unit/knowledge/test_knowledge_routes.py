@@ -41,6 +41,13 @@ def _store() -> InMemoryStore:
 
 def _as(client, method, path, *, store, config=ON, caller="alice", **kwargs):
     with (
+        # Off explicitly, not by inheritance. `ENABLE_AUTH` defaults to
+        # true and a developer's `.env` turns it off, so these six read
+        # as green here and 401 in the pipeline — the suite agreeing
+        # with whoever ran it. Who the caller is, is what `_owner`
+        # below decides; whether there is one is not what this file
+        # is about.
+        patch("agent.aegra.auth.ENABLE_AUTH", False),
         patch(
             "agent.src.agent.config.loader.AgentConfig.get_knowledge_config",
             return_value=config,

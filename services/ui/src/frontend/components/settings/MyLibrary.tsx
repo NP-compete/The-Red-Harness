@@ -51,7 +51,7 @@ export function MyLibrary() {
   }, []);
 
   const onEdit = useCallback(
-    async (id: string, title: string) => {
+    async (id: string, _title: string) => {
       setRefused('');
       const found = await readDocument(id);
       if (!found) {

@@ -223,7 +223,7 @@ ENV NODE_EXTRA_CA_CERTS=/etc/pki/ca-trust/source/anchors/Current-IT-Root-CAs.pem
 # `ui/src/server/utils/opa.ts` does `execFileSync("opa", …)`. Off
 # by default, which is why it has to be here: a toggle that
 # ENOENTs when somebody turns it on is worse than the 60MB.
-ARG OPA_VERSION=1.20.1
+ARG OPA_VERSION=1.22.1
 RUN curl -fsSL "https://github.com/open-policy-agent/opa/releases/download/v${OPA_VERSION}/opa_linux_amd64_static" \
       -o /usr/local/bin/opa \
     && chmod 755 /usr/local/bin/opa \

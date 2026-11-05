@@ -1,4 +1,3 @@
-import * as crypto from "node:crypto";
 import { buildManifest } from "./manifest.js";
 import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";

@@ -109,6 +109,12 @@ jobs:
           name: dist
           path: services/ui/dist/
           retention-days: 1
+          # vite writes the asset manifest to `dist/frontend/.vite/`, and
+          # upload-artifact drops dotted paths unless told otherwise. The
+          # e2e job then downloaded a dist the server refuses to start on
+          # — `client.router.ts` reads that manifest at boot — and the
+          # only symptom was playwright timing out waiting for a port.
+          include-hidden-files: true
 
   e2e:
     runs-on: ubuntu-latest

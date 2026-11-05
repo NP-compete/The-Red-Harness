@@ -10,6 +10,31 @@ import pytest
 from agent.src.infrastructure.middleware import build_reasoning_effort_middleware
 
 
+class _Built:
+    """What `create_model` is standing in for here."""
+
+    def __init__(self, **given: Any) -> None:
+        self.__dict__.update(given)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_model():
+    """`create_model` reaches Vertex, and these tests are not about that.
+
+    Unpatched it calls `google.auth.default()`, which finds the
+    developer's ADC on a laptop and the GCE metadata address in the
+    pipeline's container. The middleware swallows the failure, so
+    the symptom was three tests that passed here and asserted
+    `KeyError: 'model'` there — a suite that agreed with whoever ran
+    it. What is under test is the budget that gets passed, not the
+    client that comes back.
+    """
+    with patch(
+        "agent.src.agent.llm.create_model", side_effect=lambda **kw: _Built(**kw)
+    ) as built:
+        yield built
+
+
 class _Model:
     """Enough of a chat model to be rebuilt from."""
 

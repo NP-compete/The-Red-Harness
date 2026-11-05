@@ -14,10 +14,10 @@
  * means somebody changed a route and did not regenerate, so the error
  * says exactly that rather than printing 11k lines of diff.
  *
- * Strand B would put both components in one repository and make the
- * baseline a sibling path rather than `../template-agent/…`. Until
- * then the relative path is the seam, and it is checked for existence
- * so a missing checkout fails with a sentence instead of a stack.
+ * Both components live in one repository now, so the baseline is an
+ * in-tree path (`tests/fixtures/`) rather than a sibling checkout.
+ * It is still checked for existence so a missing file fails with a
+ * sentence instead of a stack.
  */
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
-const SOURCE = path.resolve(root, '../template-agent/tests/contracts/openapi-baseline.json');
+const SOURCE = path.resolve(root, '../../tests/fixtures/openapi-baseline.json');
 const TARGET = path.join(root, 'src/frontend/types/generated/agent-api.d.ts');
 
 const check = process.argv.includes('--check');
@@ -35,7 +35,7 @@ const check = process.argv.includes('--check');
 if (!fs.existsSync(SOURCE)) {
   console.error(
     `no OpenAPI baseline at ${SOURCE}\n` +
-      'Generate it in the agent repo with `make openapi-baseline`.',
+      'Generate it with `make openapi-baseline`.',
   );
   process.exit(1);
 }
