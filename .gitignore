@@ -14,8 +14,14 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# Anchored. These come from the Python packaging block, and a bare
+# `lib/` matches any directory of that name at any depth — it was
+# excluding `services/ui/src/frontend/lib/`, 442 files of interface
+# source, from the repository. The build failed in CI with
+# "Cannot find module './lib/role-utils'" against a checkout that
+# genuinely did not have it.
+/lib/
+/lib64/
 parts/
 sdist/
 var/

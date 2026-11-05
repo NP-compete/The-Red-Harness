@@ -38,7 +38,19 @@ repos:
           )$
       - id: check-toml
       - id: detect-private-key
-        exclude: ^tests/
+        # The hook matches the PEM header, not key material. These two
+        # test the interface's own outgoing-secret scanner, so the
+        # header is the input: one passes `'-----BEGIN RSA PRIVATE
+        # KEY-----\nabc'` and the other asserts on an excerpt of it.
+        # Checked for real key bodies before excluding — neither file,
+        # nor any of the 442 in that directory, holds a base64 run
+        # over forty characters.
+        exclude: |
+          (?x)^(
+            tests/
+            |services/ui/src/frontend/lib/scan-outgoing\.test\.ts
+            |services/ui/src/frontend/lib/secret-warning-view\.test\.ts
+          )
 
   # Secret detection (same approach as usernaut / template-ui)
   - repo: https://github.com/gitleaks/gitleaks
