@@ -21,17 +21,19 @@ required:
   # Everything here runs on every pull request.
   - workflow: test.yml
     checks:
-      # One job where there were two. The checks and the unit
-      # suite are Dagger functions in `ci/` now, run by a single
-      # `make ci` step, so there is one status check to require
-      # instead of two names kept in step with the workflow by hand.
+      # One job where there were six. The Python suite, the
+      # interface's lint, unit tests, guards, build and Playwright
+      # run, pre-commit, gitleaks, the image scan and the
+      # integration tier are all Dagger functions in `ci/`, run by
+      # a single `make ci` step. One status check to require
+      # instead of six names kept in step with three workflows by
+      # hand — and `make ci` on a laptop is the same execution.
       - Checks
+      # A Dagger function too, in a job of its own: it brings up
+      # three services and is slower than everything in `Checks`
+      # together, so it gets its own timeout rather than spending
+      # everyone else's.
       - Integration (compose)
-
-  - workflow: pre-commit.yml
-    checks:
-      - Pre Commit
-      - Gitleaks
 
   - workflow: dependency-review.yml
     checks:

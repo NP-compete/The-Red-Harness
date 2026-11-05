@@ -25,24 +25,46 @@ from collections.abc import Awaitable
 from typing import Annotated
 
 import dagger
-from dagger import DefaultPath, Doc, dag, function, object_type
+from dagger import DefaultPath, Doc, Ignore, dag, function, object_type
 
 PYTHON = "python:3.12-slim-bookworm"
 #: `engines` in services/ui/package.json asks for >=22.13.
 NODE = "node:22-slim"
+#: Tracks `@playwright/test` in services/ui/package.json exactly: the
+#: image ships the browser build that version expects, and a mismatch
+#: fails every test in 3ms with "Executable doesn't exist".
+PLAYWRIGHT = (
+    "mcr.microsoft.com/playwright:v1.64.0-noble@sha256:"
+    "06a9939e57531807f8d5fd76ce44b53165ffb7d7501d87ab10e285c20b1e971f"
+)
+TRIVY = "ghcr.io/aquasecurity/trivy:0.76.2"
+GITLEAKS = "ghcr.io/gitleaks/gitleaks:v8.28.0"
+#: The datastores `compose_tier` binds. The same images the compose
+#: file names, so the tier is testing what a developer runs.
+POSTGRES = "pgvector/pgvector:pg16"
+REDIS = "redis:7-alpine"
 
-#: Kept out of the build context. `.venv` and `node_modules` are
-#: gigabytes that the container rebuilds anyway, and shipping `.git`
-#: into a cache key makes every commit a cache miss.
+#: Kept out of the build context, and now actually applied — this
+#: list sat here unused while every call uploaded the whole working
+#: tree, `.venv` and `node_modules` included. That is 3.5 GB of the
+#: 4.8, rebuilt in the container anyway, and it is why a single
+#: check took minutes before it had run anything.
+#:
+#: `.git` is not here, unlike the first draft of this list.
+#: `gitleaks` reads every commit the branch can see, and
+#: `pre-commit` wants a repository to enumerate files from; without
+#: the history both pass by having nothing to look at.
 IGNORE = [
-    ".venv",
-    "node_modules",
-    ".git",
+    "**/.venv",
+    "**/node_modules",
+    "**/dist",
+    "**/__pycache__",
+    "**/.pytest_cache",
+    "**/.ruff_cache",
+    "**/.mypy_cache",
+    "**/coverage",
+    "**/htmlcov",
     ".local",
-    "dist",
-    "__pycache__",
-    ".pytest_cache",
-    ".ruff_cache",
     "ci/sdk",
 ]
 
@@ -69,6 +91,7 @@ Source = Annotated[
     dagger.Directory,
     Doc("The repository. Defaults to the directory this module lives in."),
     DefaultPath("/"),
+    Ignore(IGNORE),
 ]
 
 
@@ -204,6 +227,25 @@ class Harness:
         return out
 
     @function
+    async def pytest(
+        self,
+        source: Source,
+        args: Annotated[str, Doc("Arguments to pass to pytest, space separated")],
+    ) -> str:
+        """An arbitrary pytest run in the suite's own container.
+
+        For the failure that only happens there. Without this the
+        only way to reproduce one was to run the whole suite and
+        read thirteen minutes of log.
+        """
+        out: str = await (
+            self.base(source)
+            .with_exec(["python", "-m", "pytest", *args.split()])
+            .stdout()
+        )
+        return out
+
+    @function
     async def lint(self, source: Source) -> str:
         """Ruff over the whole tree. Not part of `ci`, and why.
 
@@ -233,7 +275,8 @@ class Harness:
         node_modules. `.github` comes along because two of the
         interface's tests read the workflows — they check the UI's
         own CI job still exists — and without it they look for a
-        `.github` that is not in the image.
+        `.github` that is not in the image. `tests/fixtures` carries
+        the OpenAPI baseline that `contract:check` regenerates from.
         """
         ui = source.directory("services/ui")
         return (
@@ -248,7 +291,90 @@ class Harness:
             .with_exec(["npm", "ci"])
             .with_directory("/src/services/ui", ui.without_directory("node_modules"))
             .with_directory("/src/.github", source.directory(".github"))
+            .with_file(
+                "/src/tests/fixtures/openapi-baseline.json",
+                source.file("tests/fixtures/openapi-baseline.json"),
+            )
         )
+
+    @function
+    async def ui_lint(self, source: Source) -> str:
+        """Eslint over the interface."""
+        out: str = await self.ui_base(source).with_exec(["npm", "run", "lint"]).stdout()
+        return out
+
+    @function
+    async def ui_checks(self, source: Source) -> str:
+        """Three guards over files that are generated and committed.
+
+        `i18n-missing` says so in its own docstring — "usable in CI" —
+        and for a long time ran nowhere: a key a component asks for
+        and the catalogue lacks renders as `settings.saveLabel` on
+        screen, because i18next falls back to the key and nothing
+        else notices. The contract check compares the interface's
+        generated types against the agent's OpenAPI baseline.
+        """
+        out: str = await (
+            self.ui_base(source)
+            .with_exec(["npm", "run", "i18n:missing"])
+            .with_exec(["npm", "run", "i18n:report"])
+            .with_exec(["npm", "run", "contract:check"])
+            .stdout()
+        )
+        return out
+
+    @function
+    def ui_dist(self, source: Source) -> dagger.Directory:
+        """The built SPA and BFF, as a directory `e2e` can mount.
+
+        This is why the build and the end-to-end run are one pipeline
+        rather than two jobs and an artifact between them. The
+        artifact was the bug: vite writes its asset manifest to a
+        dotted directory, upload-artifact drops dotted paths by
+        default, and the server that reads that manifest at boot
+        refused to start — reported as "timed out waiting 30000ms".
+        A Dagger directory has no such rule.
+        """
+        return (
+            self.ui_base(source)
+            .with_exec(["npm", "run", "build"])
+            .directory("/src/services/ui/dist")
+        )
+
+    @function
+    async def ui_build(self, source: Source) -> str:
+        """The interface builds. Shares its layer with `ui_dist`."""
+        out: str = await (
+            self.ui_base(source).with_exec(["npm", "run", "build"]).stdout()
+        )
+        return out
+
+    @function
+    async def e2e(self, source: Source) -> str:
+        """Playwright against the built BFF, in Playwright's own image.
+
+        `config/` comes along because the server watches
+        `config/agent/PROMPT.md` at boot.
+        """
+        ui = source.directory("services/ui")
+        out: str = await (
+            dag.container()
+            .from_(PLAYWRIGHT)
+            .with_mounted_cache("/root/.npm", dag.cache_volume("npm"))
+            .with_workdir("/src/services/ui")
+            .with_file("/src/services/ui/package.json", ui.file("package.json"))
+            .with_file(
+                "/src/services/ui/package-lock.json", ui.file("package-lock.json")
+            )
+            .with_exec(["npm", "ci"])
+            .with_directory("/src/services/ui", ui.without_directory("node_modules"))
+            .with_directory("/src/services/ui/dist", self.ui_dist(source))
+            .with_directory("/src/config", source.directory("config"))
+            .with_env_variable("CI", "true")
+            .with_exec(["npx", "playwright", "test"])
+            .stdout()
+        )
+        return out
 
     @function
     async def ui(self, source: Source) -> str:
@@ -261,6 +387,280 @@ class Harness:
         out: str = (
             await self.ui_base(source)
             .with_exec(["npm", "run", "test:coverage"])
+            .stdout()
+        )
+        return out
+
+    @function
+    async def pre_commit(self, source: Source) -> str:
+        """Every pre-commit hook over the whole tree.
+
+        The mypy hook is `entry: .venv/bin/mypy` with `language:
+        system`, which is right on a laptop and wrong here — nothing
+        installs a virtualenv in this container, it installs
+        system-wide. A symlink at the path the config names is
+        cheaper than two ways of saying where mypy is.
+        """
+        out: str = await (
+            self.base(source)
+            .with_user("root")
+            .with_exec(["mkdir", "-p", "/src/.venv/bin"])
+            .with_exec(["sh", "-c", "ln -sf $(command -v mypy) /src/.venv/bin/mypy"])
+            .with_exec(["chown", "-R", "ci:ci", "/src/.venv"])
+            .with_user("ci")
+            .with_exec(["git", "config", "--global", "--add", "safe.directory", "/src"])
+            .with_exec(["pre-commit", "run", "--all-files", "--show-diff-on-failure"])
+            .stdout()
+        )
+        return out
+
+    @function
+    async def gitleaks(self, source: Source) -> str:
+        """Every commit this branch can see, not just the staged ones.
+
+        The pre-commit hook scans `--staged`, which in a pipeline is
+        empty — it passes by having nothing to look at. This reads
+        the history, which is the only place a secret that was
+        committed and then deleted still is.
+        """
+        out: str = await (
+            dag.container()
+            .from_(GITLEAKS)
+            .with_entrypoint([])
+            .with_directory("/src", source)
+            .with_workdir("/src")
+            .with_exec(["git", "config", "--global", "--add", "safe.directory", "/src"])
+            .with_exec(
+                [
+                    "gitleaks",
+                    "git",
+                    "--config",
+                    ".gitleaks.toml",
+                    "--log-opts=--all",
+                    "--redact",
+                    "--verbose",
+                ]
+            )
+            .stdout()
+        )
+        return out
+
+    def _trivy(self) -> dagger.Container:
+        """Trivy, with its vulnerability database cached between runs."""
+        return (
+            dag.container()
+            .from_(TRIVY)
+            .with_entrypoint([])
+            .with_mounted_cache("/root/.cache/trivy", dag.cache_volume("trivy"))
+        )
+
+    @function
+    async def license_scan(self, source: Source) -> str:
+        """The licences of everything this repository pulls in."""
+        out: str = await (
+            self._trivy()
+            .with_directory("/src", source)
+            .with_workdir("/src")
+            .with_exec(
+                [
+                    "trivy",
+                    "filesystem",
+                    "--scanners",
+                    "license",
+                    "--severity",
+                    "UNKNOWN,HIGH,CRITICAL",
+                    "--exit-code",
+                    "1",
+                    "--config",
+                    "trivy-license.yaml",
+                    ".",
+                ]
+            )
+            .stdout()
+        )
+        return out
+
+    @function
+    def image(self, source: Source) -> dagger.Container:
+        """The runtime image, built from the Containerfile."""
+        return source.docker_build(dockerfile="Containerfile")
+
+    @function
+    async def image_scan(self, source: Source) -> str:
+        """Trivy over the image this repository ships.
+
+        The image is handed over as a tarball rather than a tag:
+        there is no daemon here holding a `scan-target:` to refer to,
+        which is the point — nothing in this depends on what the
+        runner happens to have loaded.
+        """
+        out: str = await (
+            self._trivy()
+            .with_file("/image.tar", self.image(source).as_tarball())
+            .with_file("/.trivyignore", source.file(".trivyignore"))
+            .with_workdir("/")
+            .with_exec(
+                [
+                    "trivy",
+                    "image",
+                    "--quiet",
+                    "--input",
+                    "/image.tar",
+                    "--scanners",
+                    "vuln",
+                    "--severity",
+                    "CRITICAL,HIGH",
+                    "--ignorefile",
+                    "/.trivyignore",
+                    "--exit-code",
+                    "1",
+                ]
+            )
+            .stdout()
+        )
+        return out
+
+    def _image_report(self, source: Source, fmt: str, out: str) -> dagger.File:
+        """One trivy report over the image, in `fmt`, as a file."""
+        return (
+            self._trivy()
+            .with_file("/image.tar", self.image(source).as_tarball())
+            .with_workdir("/")
+            .with_exec(
+                [
+                    "trivy",
+                    "image",
+                    "--input",
+                    "/image.tar",
+                    "--scanners",
+                    "vuln",
+                    "--format",
+                    fmt,
+                    "--output",
+                    out,
+                    "--exit-code",
+                    "0",
+                ]
+            )
+            .file(out)
+        )
+
+    @function
+    def image_sbom(self, source: Source) -> dagger.File:
+        """A CycloneDX bill of materials for the image."""
+        return self._image_report(source, "cyclonedx", "/sbom.cdx.json")
+
+    @function
+    def image_sarif(self, source: Source) -> dagger.File:
+        """The image's vulnerabilities as SARIF, for the Security tab."""
+        return self._image_report(source, "sarif", "/trivy-results.sarif")
+
+    def datastores(self, container: dagger.Container) -> dagger.Container:
+        """Bind Postgres and Redis to a container, and point it at them."""
+        postgres = (
+            dag.container()
+            .from_(POSTGRES)
+            .with_env_variable("POSTGRES_PASSWORD", "postgres")
+            .with_env_variable("POSTGRES_DB", "template_agent")
+            .with_exposed_port(5432)
+            .as_service(use_entrypoint=True)
+        )
+        redis = (
+            dag.container()
+            .from_(REDIS)
+            .with_exposed_port(6379)
+            .as_service(use_entrypoint=True)
+        )
+        return (
+            container.with_service_binding("postgres", postgres)
+            .with_service_binding("redis", redis)
+            .with_env_variable("POSTGRES_HOST", "postgres")
+            .with_env_variable("POSTGRES_PORT", "5432")
+            .with_env_variable("POSTGRES_DB", "template_agent")
+            .with_env_variable("POSTGRES_USER", "postgres")
+            .with_env_variable("POSTGRES_PASSWORD", "postgres")
+            .with_env_variable("REDIS_URL", "redis://redis:6379/0")
+        )
+
+    @function
+    async def agent_boot(self, source: Source) -> str:
+        """Start the agent against bound datastores and return its log.
+
+        A service that will not come up is invisible from the outside:
+        Dagger waits on the port and prints "3 steps running" until
+        somebody gives up. This runs the same command in the
+        foreground so the reason is readable.
+        """
+        probe = (
+            "aegra dev --host 0.0.0.0 --port 5002 --no-db-check --no-reload "
+            "> /tmp/a.log 2>&1 & "
+            "for i in $(seq 1 60); do "
+            "curl -sf -o /dev/null http://127.0.0.1:5002/health && "
+            "{ echo UP_AFTER_${i}s; break; }; sleep 1; done; "
+            "echo ---; tail -40 /tmp/a.log"
+        )
+        out: str = await (
+            self.datastores(self.base(source)).with_exec(["sh", "-c", probe]).stdout()
+        )
+        return out
+
+    @function
+    async def compose_tier(self, source: Source) -> str:
+        """The tests that need real datastores and a running agent.
+
+        They were the last thing outside this module: a job that
+        declared Postgres and Redis as service containers, started
+        the agent in a background shell and polled a health endpoint
+        with `for _ in $(seq 1 60)`. Dagger's service bindings do all
+        three, and — unlike the runner's — they work on a laptop.
+        """
+        agent = (
+            self.datastores(self.base(source))
+            .with_exposed_port(5002)
+            # `--host 0.0.0.0`, which is not the default. `aegra dev`
+            # binds 127.0.0.1, a service binding reaches the container
+            # from outside, and Dagger waits for the port forever — the
+            # first run of this sat at "3 steps running" for an hour
+            # and forty minutes with nothing to say.
+            #
+            # `--no-reload` because a file watcher in a container
+            # nobody is editing is a second process to signal.
+            .with_exec(
+                [
+                    "aegra",
+                    "dev",
+                    "--host",
+                    "0.0.0.0",
+                    "--port",
+                    "5002",
+                    "--no-db-check",
+                    "--no-reload",
+                ]
+            )
+            .as_service()
+        )
+        out: str = await (
+            self.datastores(self.base(source))
+            .with_service_binding("agent", agent)
+            .with_env_variable("LANGGRAPH_API_URL", "http://agent:5002")
+            .with_env_variable("AGENT_BASE_URL", "http://agent:5002")
+            .with_exec(
+                [
+                    "python",
+                    "-m",
+                    "pytest",
+                    "tests",
+                    "-m",
+                    "integration and not nightly",
+                    "-q",
+                    # A deadline, because a hung test here is
+                    # indistinguishable from a slow one from the
+                    # outside: this sat at "3 steps running" for an
+                    # hour and forty minutes the first time.
+                    "--timeout=180",
+                    "--timeout-method=thread",
+                ]
+            )
             .stdout()
         )
         return out
@@ -284,8 +684,26 @@ class Harness:
             return name, None
 
         jobs = [one(name) for name in CHECKS]
-        jobs.append(self._named("test", self.test(source)))
-        jobs.append(self._named("ui", self.ui(source)))
+        for name, work in (
+            ("test", self.test(source)),
+            ("ui", self.ui(source)),
+            ("ui_lint", self.ui_lint(source)),
+            ("ui_checks", self.ui_checks(source)),
+            ("ui_build", self.ui_build(source)),
+            ("e2e", self.e2e(source)),
+            ("pre_commit", self.pre_commit(source)),
+            ("gitleaks", self.gitleaks(source)),
+            ("image_scan", self.image_scan(source)),
+            # `license_scan` is deliberately absent: `required-checks.yml`
+            # calls it advisory — "a conversation rather than a build
+            # failure" — and a function in this list is a blocking one.
+            # Its workflow calls it directly. `compose_tier` is out
+            # for a different reason: it brings up three services and
+            # is minutes slower than everything else here put
+            # together, and a job that hangs inside `ci` takes the
+            # other twenty with it. Its own job, its own timeout.
+        ):
+            jobs.append(self._named(name, work))
 
         results = await asyncio.gather(*jobs)
         failed = [(name, why) for name, why in results if why]

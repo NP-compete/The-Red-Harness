@@ -13,6 +13,51 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 
+def _import_everything_that_reads_settings_at_import_time() -> None:
+    """Import, once and early, every module that reads `settings`.
+
+    Dozens of modules do `_MAX_SOMETHING = settings.SOMETHING` at
+    module level, and `graph.agent()` imports many of them lazily,
+    inside the call. So a test that patches
+    `agent.src.settings.settings` with a MagicMock and then triggers
+    the *first* import of one of them binds a MagicMock into a module
+    constant for the rest of the session — `int > MagicMock`,
+    `logging.setLevel(MagicMock)`, a pydantic field that wanted a str.
+
+    Which test that is depends entirely on ordering. Seventeen of
+    `test_graph.py` passed in a full local run and failed in the
+    pipeline, and failed locally the moment that file ran on its own:
+    the suite was green because some earlier test happened to import
+    these first. That is not a property to rely on, and it is not one
+    a reviewer can see.
+
+    Found rather than listed. A hand-written list of module names is
+    the kind of thing that is correct on the day it is written.
+    """
+    import importlib
+
+    source_root = Path(_PROJECT_ROOT) / "services"
+    marker = "from agent.src.settings import settings"
+    for path in sorted((source_root / "agent").rglob("*.py")):
+        if path.name == "__init__.py":
+            continue
+        try:
+            if marker not in path.read_text(encoding="utf-8"):
+                continue
+        except OSError:
+            continue
+        dotted = ".".join(path.relative_to(source_root).with_suffix("").parts)
+        try:
+            importlib.import_module(dotted)
+        except Exception:  # noqa: BLE001 - an optional dependency, not our problem here
+            # A module that cannot be imported at all will fail in the
+            # test that needs it, with a better message than this.
+            continue
+
+
+_import_everything_that_reads_settings_at_import_time()
+
+
 @pytest.fixture(autouse=True)
 def _no_overlay_leaks_out():
     """Clear the process-global config overlay after every test."""

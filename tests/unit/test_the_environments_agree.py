@@ -25,16 +25,39 @@ def _jobs(env: str) -> list[str]:
 
 
 class TestOneCommandPerEnvironment:
-    def test_each_environment_adds_its_own_tier(self):
-        assert "ci-compose" in _jobs("compose")
+    """One gated tier now, not two.
+
+    `ci-compose` used to be the other: it needed Postgres, Redis and
+    OPA reachable on the host, so it only ran where somebody had
+    brought them up. It is `compose_tier` in the Dagger module now
+    and binds its own, so it runs everywhere and is gated by
+    nothing. A cluster is still a cluster.
+    """
+
+    def test_the_cluster_tier_is_the_gated_one(self):
         assert "ci-kind" in _jobs("kind")
 
-    def test_and_neither_tier_leaks_into_the_other(self):
-        assert "ci-kind" not in _jobs("compose")
-        assert "ci-compose" not in _jobs("kind")
+    def test_the_integration_tier_is_not_gated_by_an_environment(self):
+        """`ci-compose` runs anywhere now; it is only gated by time.
+
+        It used to need a compose network somebody had brought up by
+        hand, so it sat behind `ENV=compose` and on most laptops ran
+        never. `compose_tier` binds its own Postgres, Redis and
+        agent. It is still a job of its own rather than part of
+        `make ci`, because three services is minutes and `ci` should
+        answer fast — not because any environment is missing.
+        """
+        for env in ("", "compose", "kind"):
+            assert "ci-compose" not in _jobs(env), (
+                "ci-compose is environment-gated again; it no longer "
+                "needs an environment, only its own timeout"
+            )
+
+    def test_the_cluster_tier_does_not_leak_into_the_default_list(self):
+        assert "ci-kind" not in _jobs("")
 
     def test_the_rest_of_the_list_is_the_same_sentence(self):
-        shared = set(_jobs("")) - {"ci-compose", "ci-kind"}
+        shared = set(_jobs("")) - {"ci-kind"}
         for env in ("compose", "kind"):
             missing = shared - set(_jobs(env))
             assert not missing, (
@@ -43,14 +66,13 @@ class TestOneCommandPerEnvironment:
             )
 
     def test_what_was_skipped_is_named(self):
-        for env, expected in (("compose", "ci-kind"), ("kind", "ci-compose")):
-            out = subprocess.run(
-                ["make", "--no-print-directory", "ci-skipped", f"ENV={env}"],
-                cwd=ROOT,
-                capture_output=True,
-                text=True,
-            )
-            assert expected in out.stdout, out.stdout
+        out = subprocess.run(
+            ["make", "--no-print-directory", "ci-skipped"],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert "ci-kind" in out.stdout, out.stdout
 
 
 class TestTheOneEnvironmentTiersAreNamed:
@@ -62,7 +84,7 @@ class TestTheOneEnvironmentTiersAreNamed:
             assert tier in text, (
                 f"{tier} runs in one environment and docs/development/ci.md is silent"
             )
-        assert "Needs Postgres, Redis and OPA" in text
+        assert "Needs Postgres, Redis and a running agent" in text
         assert "no kubelet to be wrong about" in text
 
     def test_it_names_the_tiers_in_neither_list(self):

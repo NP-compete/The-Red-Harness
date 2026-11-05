@@ -198,9 +198,25 @@ class TestClearGraphCache:
         fake_graph._graph_cache = {}
         fake_graph._graph_cache_ts = {}
         self._fake_graph = fake_graph
+        # Put back whatever was there, rather than popping. Popping
+        # leaves `agent.aegra.graph` unimported for the rest of the
+        # worker, so the next `from agent.aegra.graph import …`
+        # re-imports it — and in `test_graph.py` that happens inside
+        # a `patch("agent.src.settings.settings", MagicMock())`, which
+        # binds `_MAX_GRAPH_CACHE_SIZE = settings.GRAPH_CACHE_MAX_SIZE`
+        # to a mock: `TypeError: '>' not supported between instances
+        # of 'int' and 'MagicMock'`, sixteen times.
+        #
+        # Which tests that hits depends on how xdist groups files
+        # across workers, which is why it moved around and looked
+        # like flakiness.
+        was = sys.modules.get("agent.aegra.graph")
         sys.modules["agent.aegra.graph"] = fake_graph
         yield
-        sys.modules.pop("agent.aegra.graph", None)
+        if was is not None:
+            sys.modules["agent.aegra.graph"] = was
+        else:
+            sys.modules.pop("agent.aegra.graph", None)
 
     def test_clears_both_dicts(self):
         self._fake_graph._graph_cache["key1"] = "value1"

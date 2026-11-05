@@ -51,8 +51,11 @@ class TestTheDeclaration:
 
 
 class TestWhatItCovers:
-    # "Test Suite" and "Config, contract and deployment" were two
-    # jobs; they are one Dagger call reported as "Checks" now.
+    # Six jobs became one. The unit suite, the interface's whole
+    # workflow, pre-commit, gitleaks, the image scan and the
+    # integration tier are Dagger functions behind a single `make
+    # ci`, reported as "Checks". The cluster tier is the only one
+    # still outside, because Dagger cannot stand up a kind cluster.
     @pytest.mark.parametrize("check", ["Checks", "Integration (compose)"])
     def test_the_tiers_that_run_on_every_pull_request_are_required(self, check):
         required = {one for entry in _declared()["required"] for one in entry["checks"]}

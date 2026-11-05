@@ -83,48 +83,26 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "package_name=deployment.zip" >> $GITHUB_OUTPUT
 
-      - name: Build image locally for scanning
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: ./Containerfile
-          push: false
-          load: true
-          tags: scan-target:${{ steps.version.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64
+      - name: Install Dagger
+        run: make dagger-install
 
+      # The build-and-scan half is `dagger call`, like every other
+      # check. It used to be `docker/build-push-action` with
+      # `load: true` followed by four `trivy-action` steps pointed at
+      # the tag it left in the daemon — five steps that depended on
+      # the runner having a daemon with the right thing in it, and
+      # that nobody could run before pushing. `make image-scan` is
+      # now the same execution on a laptop.
+      #
+      # The push below is still buildx: it needs registry
+      # credentials and two platforms, and the provenance attestation
+      # has no Dagger equivalent that GitHub will accept.
       - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: scan-target:${{ steps.version.outputs.version }}
-          format: table
-          severity: CRITICAL,HIGH
-          scanners: vuln
-          trivyignores: .trivyignore
-          exit-code: '1'
-
-      - name: Generate Trivy JSON report
-        if: always()
-        continue-on-error: true
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: scan-target:${{ steps.version.outputs.version }}
-          format: json
-          output: trivy-report.json
-          scanners: vuln
-          exit-code: '0'
+        run: make image-scan
 
       - name: Generate SBOM
         continue-on-error: true
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: scan-target:${{ steps.version.outputs.version }}
-          format: cyclonedx
-          output: sbom.cdx.json
-          scanners: vuln
-          exit-code: '0'
+        run: .local/bin/dagger -m ci call image-sbom export --path=sbom.cdx.json
 
       - name: Upload SBOM
         if: always() && hashFiles('sbom.cdx.json') != ''
@@ -138,13 +116,7 @@ jobs:
       - name: Generate SARIF report
         if: always()
         continue-on-error: true
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: scan-target:${{ steps.version.outputs.version }}
-          format: sarif
-          output: trivy-results.sarif
-          scanners: vuln
-          exit-code: '0'
+        run: .local/bin/dagger -m ci call image-sarif export --path=trivy-results.sarif
 
       - name: Upload Trivy scan results to GitHub Security tab
         if: always() && hashFiles('trivy-results.sarif') != ''

@@ -31,14 +31,26 @@ jobs:
   checks:
     name: Checks
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
+      # Full history, for the secret scan. `gitleaks git --log-opts=--all`
+      # reads every commit this branch can see; at the default depth of
+      # one it finds nothing and says so cheerfully. This used to be a
+      # job of its own partly to keep the history away from a runner
+      # that installs pull-request dependencies — nothing is installed
+      # on the runner any more, so that reason has gone with it.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
-      # Fifteen `make <target>` steps and a separate unit-test job
-      # used to live here, kept in step with `make ci` by two tests.
-      # The checks are Dagger functions in `ci/` now, so there is one
-      # definition and one container — this runs the identical
-      # command a developer runs, not an equivalent list.
+      # Every check is a Dagger function in `ci/`: the Python suite,
+      # the interface's lint, unit tests, i18n and contract guards,
+      # its build and its Playwright run, pre-commit, gitleaks, the
+      # image scan and the integration tier with its own Postgres,
+      # Redis and agent. There is one definition and one container,
+      # so this runs the identical command a developer runs — not an
+      # equivalent list, and not a shell script that drifted from one.
       - name: Install Dagger
         run: make dagger-install
 
@@ -48,60 +60,28 @@ jobs:
   compose-tier:
     name: Integration (compose)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
-    # The datastores the unit suite deliberately does without.
-    # Declared here rather than started in a step: a service the
-    # job declares is one the runner waits for and tears down.
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: template_agent
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
+    # No `services:` block any more, and no `aegra dev &` followed by
+    # a `for _ in $(seq 1 60)` health poll. `compose_tier` binds its
+    # own Postgres, Redis and agent, so this is the same execution a
+    # laptop gets from `make ci-compose` — which, before this, was a
+    # target that skipped itself unless you had brought a compose
+    # network up by hand.
+    #
+    # A job of its own rather than one more function inside `make ci`:
+    # it is minutes slower than the rest together, and one slow thing
+    # inside `ci` delays every answer in it.
     steps:
-    - name: Checkout code
-      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      with:
-        persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
-    - name: Setup Python with uv
-      uses: ./.github/actions/setup-python-uv
-      with:
-        python-version: "3.14"
+      - name: Install Dagger
+        run: make dagger-install
 
-    # The tier talks to a running agent, so one is started here.
-    # `make ci-compose` reports it as skipped — by name — when the
-    # agent is not reachable, which is the honest answer and not a
-    # pass; this job exists so the answer is not "skipped" forever.
-    - name: Start the agent
-      run: |
-        source .venv/bin/activate
-        POSTGRES_HOST=localhost POSTGRES_DB=template_agent \
-          POSTGRES_USER=postgres POSTGRES_PASSWORD=postgres \
-          REDIS_URL=redis://localhost:6379/0 \
-          python .venv/bin/aegra dev --port 5002 --no-db-check &
-        for _ in $(seq 1 60); do curl -sf http://127.0.0.1:5002/health && break; sleep 2; done
-
-    - name: Integration tier
-      run: make ci-compose LANGGRAPH_API_URL=http://127.0.0.1:5002
+      - name: Integration tier
+        run: make ci-compose
 
   kind-tier:
     name: Cluster (kind)

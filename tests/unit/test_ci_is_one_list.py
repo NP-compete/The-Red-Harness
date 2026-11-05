@@ -68,14 +68,23 @@ def _dagger_functions() -> set[str]:
     import ast
 
     tree = ast.parse((REPO / "ci" / "src" / "harness" / "main.py").read_text())
+
+    def named(decorator: ast.expr) -> str:
+        """The decorator's name, whether or not it was called.
+
+        `@function` and `@function(name="e2e")` are the same
+        decorator; reading only the first missed `e2e` and reported
+        it as a job with nothing behind it.
+        """
+        if isinstance(decorator, ast.Call):
+            decorator = decorator.func
+        return getattr(decorator, "id", getattr(decorator, "attr", ""))
+
     return {
         node.name
         for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and any(
-            getattr(d, "id", getattr(d, "attr", "")) == "function"
-            for d in node.decorator_list
-        )
+        and any(named(d) == "function" for d in node.decorator_list)
     }
 
 

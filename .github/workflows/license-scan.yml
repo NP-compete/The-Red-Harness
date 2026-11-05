@@ -33,7 +33,7 @@ jobs:
   license-scan:
     name: License Scan
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Checkout code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -43,12 +43,13 @@ jobs:
           # needs the credential it would drop.
           persist-credentials: false
 
+      - name: Install Dagger
+        run: make dagger-install
+
+      # A job of its own rather than one more function in `make ci`,
+      # and the reason is in `required-checks.yml`: this is advisory,
+      # "a conversation rather than a build failure". Everything
+      # inside `ci` blocks a merge, so an advisory check cannot live
+      # there. Same container, same trivy, different consequence.
       - name: Scan for license violations
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: license
-          severity: UNKNOWN,HIGH,CRITICAL
-          exit-code: '1'
-          trivy-config: trivy-license.yaml
+        run: make license-scan

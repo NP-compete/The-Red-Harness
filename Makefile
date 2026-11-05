@@ -473,14 +473,6 @@ CI_IMAGE := harness:ci
 #: Where the integration tier looks for a running agent.
 LANGGRAPH_API_URL ?= http://127.0.0.1:2024
 KIND_NS := template-agent
-
-# Where `ci-compose` looks for the datastores. The compose file
-# publishes both on localhost, and so does the pipeline's service
-# container block, so one default covers a laptop and a runner.
-PG_HOST ?= localhost
-PG_PORT ?= 5432
-REDIS_HOST ?= localhost
-REDIS_PORT ?= 6379
 KIND_DIR := .kind
 # Rootless podman cannot bind ports below 1024, so the ingress is published on
 # high ports. Everything the tests use goes through port-forward regardless.
@@ -824,59 +816,40 @@ ci-jobs: ## The job list `make ci` runs, one per line
 	        if isinstance(n,(ast.Assign,ast.AnnAssign))\
 	        and 'CHECKS' in ast.dump(n)[:200]);\
 	    print(chr(10).join(sorted(checks)));\
-	    print('test');\
-	    print('ui')"
+	    body=src[src.index('async def ci('):];\
+	    import re;\
+	    print(chr(10).join(re.findall(r'\\(\"([a-z_0-9]+)\", self\\.', body)))"
 	@case "$(ENV)" in \
-	  compose) printf '%s\n' ci-compose ;; \
-	  kind)    printf '%s\n' ci-kind evals-live-kind e2e-live load-smoke ;; \
+	  kind) printf '%s\n' ci-kind evals-live-kind e2e-live load-smoke ;; \
 	esac
-	@printf '%s\n' pre-commit
 
 ci-skipped: ## What `make ci` did not run here, and why
 	@# Named, never omitted. "Evals are in CI" is a sentence that
 	@# is true and worthless when the judged groups were skipped
 	@# and nobody said so.
 	@case "$(ENV)" in \
-	  compose) echo "── skipped: ci-kind (needs a cluster; make ci ENV=kind)" ;; \
-	  kind)    echo "── skipped: ci-compose (needs the compose datastores; make ci ENV=compose)" ;; \
-	  "")      echo "── skipped: ci-compose, ci-kind, evals-live-kind, e2e-live, load-smoke (make ci ENV=compose|kind)" ;; \
+	  kind) true ;; \
+	  *)    echo "── skipped: ci-kind, evals-live-kind, e2e-live, load-smoke (needs a cluster; make ci ENV=kind)" ;; \
 	esac
+	@echo "── skipped: ci-compose (three services and minutes; make ci-compose)"
+	@echo "── skipped: license-scan (advisory, not a merge gate; make license-scan)"
 	@echo "── skipped: test-skills (grades real model output; make test-skills)"
 	@echo "── skipped: test-nightly (needs a running stack; make test-nightly)"
-	@case "$(ENV)" in \
-	  "") true ;; \
-	esac
 
-ci-compose: ## The checks that need the compose datastores (E26-T15)
-	@# Postgres, Redis and OPA, which the unit suite deliberately
-	@# does without. These are the ones that would otherwise only
-	@# ever run in the pipeline.
-	@# Probed by connecting, not by asking podman for a container
-	@# name. In the pipeline these are the job's service containers
-	@# and there is no podman to ask, so the name check reported
-	@# "not up" against datastores that were listening — a guard
-	@# that tests the mechanism instead of the thing it needs.
-	@python3 -c "import socket; \
-[socket.create_connection((h, p), 5).close() for h, p in \
- (('$(PG_HOST)', $(PG_PORT)), ('$(REDIS_HOST)', $(REDIS_PORT)))]" 2>/dev/null || \
-		(echo "No Postgres on $(PG_HOST):$(PG_PORT) or Redis on $(REDIS_HOST):$(REDIS_PORT). 'podman compose up -d' or 'make dev'." && exit 2)
-	@# `|| echo` here once turned 14 failing tests into the line
-	@# "nothing to run against the datastores", which is the most
-	@# comfortable wrong answer available. Absent, skipped and
-	@# failing are three different things and only two of them
-	@# are fine.
-	@# They talk to a running agent, not to the datastores
-	@# directly. Reported as skipped — by name, with the way to
-	@# make them runnable — rather than failed, because an agent
-	@# nobody started is not a broken agent.
-	@if curl -sf -o /dev/null --max-time 3 "$(LANGGRAPH_API_URL)/health"; then \
-		.venv/bin/python -m pytest tests -m "integration and not nightly" -q; \
-	else \
-		echo "  skipped: no agent at $(LANGGRAPH_API_URL)."; \
-		echo "           'make dev', or point LANGGRAPH_API_URL at one:"; \
-		echo "           kubectl -n $(KIND_NS) port-forward svc/agent 5002:5002 &"; \
-		echo "           make ci-compose LANGGRAPH_API_URL=http://127.0.0.1:5002"; \
-	fi
+ci-compose: ## The tests that need real datastores and a running agent
+	@# Dagger, like everything else. This used to probe for the
+	@# datastores and skip itself when they were absent — an honest
+	@# answer that was also, on most laptops, every answer. The
+	@# function brings its own Postgres, Redis and agent, so there
+	@# is nothing to be absent and nothing to skip.
+	@$(MAKE) --no-print-directory dagger-engine
+	@$(DAGGER) -m ci call compose-tier
+
+license-scan: ## Trivy over every dependency's licence (advisory)
+	@# Not in `make ci`: `required-checks.yml` calls this advisory,
+	@# and everything `ci` runs blocks a merge.
+	@$(MAKE) --no-print-directory dagger-engine
+	@$(DAGGER) -m ci call license-scan
 
 ci-kind: ## The checks only a cluster can make (E26-T15)
 	@# A readiness probe, an ingress rule and an SCC are things a
@@ -1481,18 +1454,17 @@ image-size: ## The one image against the two it replaces (E10-T23)
 	@# is larger than the pair it replaces — which is the claim
 	@# strand D makes, and the one that stops being true quietly.
 	@#
-	@# CVE count is the other half of T23 and needs a scanner
-	@# this machine does not have; `make image-scan` says so
-	@# rather than reporting zero.
+	@# CVE count is the other half of T23: `make image-scan`.
 	@.venv/bin/python scripts/dev/image_size.py
 
 .PHONY: image-scan
-image-scan: ## CVE count for the image (E10-T23) — needs a scanner
-	@command -v trivy >/dev/null 2>&1 || command -v grype >/dev/null 2>&1 || \
-		(echo "No trivy or grype on PATH. The count is part of T23's budget and" && \
-		 echo "nothing here will invent one: install a scanner, or run this in CI." && exit 2)
-	@trivy image --severity HIGH,CRITICAL --quiet $(HARNESS_IMAGE) 2>/dev/null || \
-		grype $(HARNESS_IMAGE)
+image-scan: ## CVE count for the image (E10-T23)
+	@# It used to need trivy or grype on PATH and refused without
+	@# one, which on most laptops meant "run this in CI" — so the
+	@# other half of T23's budget was measured nowhere. Trivy comes
+	@# in a container now, with the image built in the same engine.
+	@$(MAKE) --no-print-directory dagger-engine
+	@$(DAGGER) -m ci call image-scan
 
 .PHONY: ci-image
 ##@ Check

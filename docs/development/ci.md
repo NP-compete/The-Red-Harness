@@ -1,32 +1,41 @@
 # The pipeline
 
-Every job is a make target, so the list a pull request runs and
-the list you can run are one list:
+Every job is a Dagger function in `ci/src/harness/main.py`, so the
+list a pull request runs and the list you can run are not two
+lists that agree — they are one execution, in one container:
 
 ```sh
-make ci              # the whole pull-request pipeline, locally
-make ci JOB=test     # one job
-make ci-jobs         # what the list is
+make ci                        # the whole pull-request pipeline, locally
+dagger -m ci call test         # one job
+dagger -m ci functions         # what there is
+make ci-jobs                   # what the list is
 ```
 
-If a job here is not a make target, that is the bug — fix the
-workflow, not this page.
+The workflow runs `make ci` and nothing else. If a check is a
+shell step in a workflow, that is the bug — write the function,
+not the step.
 
 ## What runs, and what it gates
 
-| Job | Target | What it is for | When it fails |
+| Job | Function | What it is for | When it fails |
 |---|---|---|---|
-| Configuration tree | `make validate-config` | The shipped tree still loads against this build's models | A field was renamed or removed without a migration. See `docs/compatibility.md` |
-| Deployment overlays | `make render-deployment-check` | Overlays match `values.yaml` | Somebody edited a rendered file instead of its input. Re-render |
-| Offline evals | `make evals-offline` | Retrieval quality against the corpus in the tree | A score fell further than the noise either run carried. Not on a first run, not on an improvement |
-| Contract | `make test-contract` | The OpenAPI baseline matches the app | A route or payload changed. `make openapi-baseline`, then regenerate the UI's types |
-| Deployment manifests | `make test-deployment` | SCC, probes, non-root, resource limits | A manifest lost a constraint the cluster will reject at apply time |
-| Unit suite | `make test` | Everything else | Read the failure; it is a test |
-| Pre-commit | `make pre-commit` | Formatting and lint | Run it locally; most of it fixes itself |
+| Configuration tree | `validate_config` | The shipped tree still loads against this build's models | A field was renamed or removed without a migration. See `docs/compatibility.md` |
+| Deployment overlays | `render_deployment` | Overlays match `values.yaml` | Somebody edited a rendered file instead of its input. Re-render |
+| Offline evals | `evals_offline` | Retrieval quality against the corpus in the tree | A score fell further than the noise either run carried. Not on a first run, not on an improvement |
+| Unit suite | `test` | Everything else | Read the failure; it is a test |
+| Interface unit suite | `ui` | The React and Fastify tests | Read the failure; it is a test |
+| Interface lint | `ui_lint` | eslint | Run `npm run lint` in `services/ui` |
+| Interface guards | `ui_checks` | i18n keys, untranslated strings, the OpenAPI contract | A route changed and the generated types did not, or a sentence was typed into a component |
+| Interface build | `ui_build` | vite and tsc agree | Read the error; it is a compiler |
+| End to end | `e2e` | Playwright against the built BFF | A page stopped working, or the server stopped starting |
+| Pre-commit | `pre_commit` | Formatting, lint, mypy, bandit | Run it locally; most of it fixes itself |
+| Secret scan | `gitleaks` | Every commit this branch can see | Rotate it first, then rewrite the history |
+| Image scan | `image_scan` | CRITICAL and HIGH CVEs in the shipped image | A dependency or a base image needs bumping, or an entry in `.trivyignore` with a reason |
+| Integration | `compose_tier` | The tests that need Postgres, Redis and a running agent | It binds all three itself, so a failure here is the code |
 
-The first five are seconds, not minutes, and run as their own job
-on purpose: a contract break should not wait behind coverage
-instrumentation to be reported.
+Eleven of them are seconds, not minutes. They run concurrently in
+one engine, so a contract break is reported without waiting behind
+coverage instrumentation.
 
 ## `make ci` passes, and it did not an hour ago
 
@@ -49,17 +58,23 @@ failing — and the second one is usually the real bug.
 
 ## Jobs that are not in `make ci`
 
-Release signing, SBOM and provenance (`package-release.yml`),
-image builds, the licence scan and the OpenSSF scorecard. They
-need registry credentials, a tag, or the network, so they run in
-the pipeline and not on a laptop. `make ci` says what it skipped
-rather than passing silently.
+Release signing and provenance (`package-release.yml`), the image
+push, and the OpenSSF scorecard. They need registry credentials, a
+tag, or GitHub's own OIDC, so they run in the pipeline and not on
+a laptop.
 
-## The two local environments, and what only runs in one
+The licence scan is a function — `make license-scan` — and
+deliberately outside `make ci`: `required-checks.yml` calls it
+advisory, "a conversation rather than a build failure", and
+everything `ci` gathers blocks a merge. Same container, same
+trivy, different consequence.
+
+`make ci` says what it skipped rather than passing silently.
+
+## The local environments, and what only runs in one
 
 ```sh
-make ci               # the checks that need nothing
-make ci ENV=compose   # and the ones that need the datastores
+make ci               # everything a container can do
 make ci ENV=kind      # and the ones that need a cluster
 ```
 
@@ -67,13 +82,13 @@ The job list is the same sentence either way. `make ci-skipped`
 names what the chosen environment left out, so a green `make ci`
 never means two different things without saying which.
 
-Two tiers run in one environment only. Both are listed here
-because a tier that quietly exists in one place is a tier whose
-absence nobody notices:
+One tier runs in one environment only. It is listed here because
+a tier that quietly exists in one place is a tier whose absence
+nobody notices:
 
 | Tier | Target | Runs in | Why not the other |
 |---|---|---|---|
-| Integration | `ci-compose` | compose | Needs Postgres, Redis and OPA reachable as `pgvector`/`redis`/`opa`, which is a compose network. It will run against Kind — point `LANGGRAPH_API_URL` at a port-forward, the target prints the command — but it is not what `ENV=kind` runs |
+| Integration | `ci-compose` | everywhere | Needs Postgres, Redis and a running agent, and used to need you to have brought them up — `ENV=compose` meant "I have a compose network". `compose_tier` binds its own now, so it is in the default list and gated by nothing |
 | Cluster | `ci-kind` | Kind | A readiness probe, an ingress rule, an SCC and `enableServiceLinks: false` are things compose has no kubelet to be wrong about |
 | Nightly | `make test-nightly` | neither, by hand | Kills and restarts a running stack. In no `make ci` list on purpose |
 | Timings | `make timings` | neither, by hand | Measures the `make dev` loop — an edit to a module, then the agent's own "serving again" line. Neither `ENV=` has that loop running, and starting one would measure the start instead. With nothing up it prints `no measurement — is the loop running?` and exits non-zero rather than passing (DX-7) |
@@ -91,8 +106,9 @@ assumed:
 | OpenShift (`buildconfig.yaml`) | `Containerfile` |
 
 So compose agrees with production and disagrees with Kind. An
-integration test that passes under `ENV=compose` has exercised a
-different build from the one `ENV=kind` and the pipeline run.
+integration test that passes against the compose build has
+exercised a different build from the one `ENV=kind` and the
+pipeline run.
 `tests/unit/test_the_environments_agree.py` pins the four, so a
 fifth divergence fails rather than appears. Closing it means
 OpenShift and compose moving to `Containerfile --target

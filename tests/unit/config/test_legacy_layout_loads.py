@@ -23,11 +23,27 @@ RENAMED = [
 
 @pytest.fixture
 def legacy(tmp_path, monkeypatch):
-    """The shipped tree, with every renamed file put back."""
-    from agent.src.agent.config.paths import config_root
+    """The shipped tree, with every renamed file put back.
+
+    `CONFIG_ROOT`, not `config_root()`. The latter reads
+    `CONFIG_PATH`, so this copied whichever tree the ambient
+    environment happened to name — and when that was another test's
+    half-built temporary directory the copy had no `subagents/` and
+    no `mcp`, and two tests here failed with `assert {}` in a worker
+    that had run the wrong file first. What is under test is the
+    shipped tree; nothing should be able to substitute another.
+    """
+    from agent._root import CONFIG_ROOT
+
+    source = CONFIG_ROOT
+    assert (source / "subagents").is_dir(), (
+        f"{source} has no subagents/, so this fixture would build a tree "
+        "with nothing in it and the assertions below would be about the "
+        "copy rather than the layout."
+    )
 
     tree = tmp_path / "agent"
-    shutil.copytree(config_root(), tree)
+    shutil.copytree(source, tree)
     for name in RENAMED:
         preferred, older = _CANDIDATES[name][0], _CANDIDATES[name][1]
         if (tree / preferred).is_file():
@@ -35,9 +51,27 @@ def legacy(tmp_path, monkeypatch):
             shutil.move(str(tree / preferred), str(tree / older))
 
     monkeypatch.setenv("CONFIG_PATH", str(tree))
-    from agent.src.agent.config.loader import AgentConfig
 
-    return AgentConfig(tree)
+    # `AgentConfig` is a singleton: its `__init__` returns early once
+    # `_initialized` is set, so `AgentConfig(tree)` is not a new
+    # loader pointed at `tree` — it is whichever one the process
+    # already has, still reading whatever it was built with. That is
+    # why these two came out `{}` under xdist and passed alone: it
+    # depended on whether anything had constructed it first.
+    #
+    # The recipe is the one in `tests/README.md` and in
+    # `test_graph_cache_notices_the_tree.py`: set `CONFIG_PATH`, which
+    # `config_root()` reads, *and* `_base_dir`, which the loader
+    # captured. `loader.py` compares the two, so they have to agree.
+    from agent.src.agent.config.loader import AgentConfig, agent_config
+
+    monkeypatch.setattr(agent_config, "_base_dir", tree)
+    monkeypatch.setattr(agent_config, "_configs_loaded", False)
+
+    loader = AgentConfig(tree)
+    monkeypatch.setattr(loader, "_base_dir", tree)
+    monkeypatch.setattr(loader, "_configs_loaded", False)
+    return loader
 
 
 class TestTheTableItself:

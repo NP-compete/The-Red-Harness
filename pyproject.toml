@@ -81,6 +81,10 @@ dev = [
     "pytest-cov==6.2.1",
     "pytest-mock==3.16.0",
     "pytest-xdist==3.8.0",
+    # A hung test is worse than a failing one: `compose_tier` sat at
+    # "3 steps running" for an hour and forty minutes with nothing to
+    # read. A per-test deadline turns that into a name and a stack.
+    "pytest-timeout==2.4.0",
     "ruff==0.17.0",
     "mypy==1.17.1",
     "types-PyYAML==6.0.12.20250915",
