@@ -27,9 +27,20 @@ from typing import Annotated
 import dagger
 from dagger import DefaultPath, Doc, Ignore, dag, function, object_type
 
-PYTHON = "python:3.12-slim-bookworm"
+#: Docker Hub, through Google's pull-through mirror. Not a
+#: preference: two runs in a row died on
+#: `failed to copy: read: connection reset by peer` pulling
+#: `node:22-slim` and `pgvector/pgvector:pg16` straight from
+#: docker.io, which took five checks and the whole integration tier
+#: with them and had nothing to do with the code. `mirror.gcr.io`
+#: serves the same digests and does not rate-limit a runner.
+#: `mcr.microsoft.com` and `ghcr.io` images below are left alone —
+#: they are not the ones that failed.
+HUB = "mirror.gcr.io"
+
+PYTHON = f"{HUB}/library/python:3.12-slim-bookworm"
 #: `engines` in services/ui/package.json asks for >=22.13.
-NODE = "node:22-slim"
+NODE = f"{HUB}/library/node:22-slim"
 #: Tracks `@playwright/test` in services/ui/package.json exactly: the
 #: image ships the browser build that version expects, and a mismatch
 #: fails every test in 3ms with "Executable doesn't exist".
@@ -41,8 +52,8 @@ TRIVY = "ghcr.io/aquasecurity/trivy:0.76.2"
 GITLEAKS = "ghcr.io/gitleaks/gitleaks:v8.28.0"
 #: The datastores `compose_tier` binds. The same images the compose
 #: file names, so the tier is testing what a developer runs.
-POSTGRES = "pgvector/pgvector:pg16"
-REDIS = "redis:7-alpine"
+POSTGRES = f"{HUB}/pgvector/pgvector:pg16"
+REDIS = f"{HUB}/library/redis:7-alpine"
 
 #: Kept out of the build context, and now actually applied — this
 #: list sat here unused while every call uploaded the whole working
@@ -406,7 +417,7 @@ class Harness:
         if code != 0:
             raise RuntimeError(
                 f"{out}\n\nplaywright exited {code}. "
-                "`dagger -m ci call e2e-report export --path=playwright-report` "
+                "`dagger -m ci call e-2-e-report export --path=playwright-report` "
                 "for the traces."
             )
         return out
