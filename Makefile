@@ -846,6 +846,13 @@ ci-compose: ## The tests that need real datastores and a running agent
 	@$(MAKE) --no-print-directory dagger-engine
 	@$(DAGGER) -m ci call compose-tier
 
+protect: ## Make the branch and tag rules match `.github/required-checks.yml`
+	@# Needs `gh` on a login that administers the repository.
+	@$(PY) scripts/ci/protect_main.py --apply
+
+protect-check: ## Do the live rules still say what the repository says?
+	@$(PY) scripts/ci/protect_main.py --check
+
 license-scan: ## Trivy over every dependency's licence (advisory)
 	@# Not in `make ci`: `required-checks.yml` calls this advisory,
 	@# and everything `ci` runs blocks a merge.

@@ -17,6 +17,32 @@
 # means "this change does not touch deployment", not "the cluster
 # was not tried and we shrugged".
 
+# Tags, once pushed, do not move.
+#
+# `tag.yml` pushes a pre-release tag and `package-release.yml`
+# builds a GitHub Release from one; an image is signed against the
+# digest a tag pointed at. A tag that can be moved afterwards makes
+# every one of those statements conditional on nobody having moved
+# it, which is not a property you can check after the fact.
+tags:
+  # `~ALL`, not a glob. GitHub rejects `**/*` as a target
+  # pattern on a tag ruleset — "Invalid target patterns".
+  pattern: "~ALL"
+  protected: true
+
+# How many approving reviews a pull request needs, and whether a
+# code owner has to be among them.
+#
+# Zero today, and that is a fact about the repository rather than a
+# position on review: it has one maintainer, and a rule that nobody
+# present can satisfy is a rule that gets bypassed or switched off.
+# `CONTRIBUTING.md` asks for a CODEOWNERS review; this is what is
+# *enforced*, and the two differing is worth seeing rather than
+# hiding. Raise both the day there is a second person.
+reviews:
+  count: 0
+  code_owners: false
+
 required:
   # Everything here runs on every pull request.
   - workflow: test.yml

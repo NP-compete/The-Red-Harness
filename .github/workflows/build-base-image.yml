@@ -15,12 +15,12 @@ on:
       - 'tests/**'
   workflow_dispatch:
 
+# Read at the top, written only where writing happens. The five
+# write scopes below used to sit here, which gave them to every job
+# in the file — one job today, and the next one added would have
+# inherited the lot without anybody choosing that.
 permissions:
-  contents: write
-  packages: write
-  security-events: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -30,6 +30,12 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write        # the GitHub Release, on a tag
+      packages: write        # ghcr.io
+      security-events: write # the SARIF upload
+      id-token: write        # cosign and provenance, via OIDC
+      attestations: write    # the provenance attestation itself
 
     steps:
       - name: Checkout code

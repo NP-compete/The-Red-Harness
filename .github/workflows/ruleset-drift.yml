@@ -1,0 +1,61 @@
+name: Branch Rules
+
+# Does the live branch rule still say what the repository says?
+#
+# `.github/required-checks.yml` opens by claiming to be the source
+# of truth for branch protection. It was not: for the whole life of
+# the repository the rule on `main` required a pull request and no
+# status checks at all, so every name in that file — `Checks` and
+# `Integration (compose)` included — gated nothing. A red pipeline
+# could be merged by anyone who scrolled past the red.
+#
+# A declaration nobody compares to reality drifts back to that the
+# first time somebody changes a setting in the browser. This
+# compares them, on a schedule, and fails when they disagree.
+
+on:
+  schedule:
+    # 07:00 UTC daily. Not on pull requests: the rule is a property
+    # of the repository, not of a change, and a job that cannot run
+    # from a fork is a job that reports nothing useful there.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    name: Branch Rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-python-uv
+
+      # Reading a ruleset needs administration, which `GITHUB_TOKEN`
+      # does not have at any permission level. So this needs a PAT.
+      #
+      # It fails rather than skips when the secret is absent. A
+      # check that quietly does nothing when its credential is
+      # missing is the exact shape of the integration tier that
+      # reported success for months while running no tests — and
+      # this one would be reporting that the branch rules are fine.
+      - name: Compare the rule with the declaration
+        env:
+          GH_TOKEN: ${{ secrets.RULESET_READ_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::error::RULESET_READ_TOKEN is not set, so the branch rules"
+            echo "::error::cannot be read and this check cannot tell you anything."
+            echo "::error::Add a fine-grained PAT with Administration: read."
+            exit 1
+          fi
+          .venv/bin/python scripts/ci/protect_main.py --check
