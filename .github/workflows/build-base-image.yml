@@ -113,7 +113,7 @@ jobs:
       - name: Upload SBOM
         if: always() && hashFiles('sbom.cdx.json') != ''
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sbom-${{ steps.version.outputs.version }}
           path: sbom.cdx.json
@@ -134,7 +134,7 @@ jobs:
       - name: Upload Trivy report as artifact
         if: always() && hashFiles('trivy-results.sarif') != ''
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: trivy-report-${{ steps.version.outputs.version }}
           path: trivy-results.sarif
@@ -335,7 +335,7 @@ jobs:
       - name: Upload deployment package as artifact (for branch builds)
         if: "!startsWith(github.ref, 'refs/tags/') && github.event_name != 'pull_request'"
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.version.outputs.package_name }}
           path: ${{ steps.version.outputs.package_name }}
@@ -344,7 +344,7 @@ jobs:
       - name: Upload agent info artifact (for package-release workflow)
         if: github.event_name != 'pull_request'
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: last-good-agent
           path: deployment/release-info.json
