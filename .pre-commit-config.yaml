@@ -1,0 +1,108 @@
+# Install: pip install pre-commit && pre-commit install
+#   (or: make install)
+# Run manually: pre-commit run --all-files
+#
+# Secret scanning: gitleaks + detect-private-key (same approach as usernaut / template-ui).
+# Also enable GitHub Secret Scanning + Push Protection on the repo:
+# https://docs.github.com/en/code-security/concepts/secret-security/secret-scanning
+# https://docs.github.com/en/code-security/concepts/secret-security/push-protection
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: ['--allow-multiple-documents']
+        # Helm templates are Go templates, not YAML, until `helm template`
+        # renders them. `make lint-chart` covers these instead.
+        exclude: ^deployment/chart/templates/
+      - id: check-added-large-files
+        # The lockfiles and the generated OpenAPI baseline are all
+        # legitimately over the 500 KB default and all must stay in-tree.
+        exclude: ^(uv\.lock|services/ui/package-lock\.json|tests/fixtures/openapi-baseline\.json)$
+      - id: check-merge-conflict
+      - id: debug-statements
+      - id: check-case-conflict
+      - id: check-docstring-first
+      - id: check-json
+        # JSONC: comments are intentional and `_load_jsonc` strips
+        # them. Matches both the current path and the pre-rename one,
+        # since `config.paths` still accepts the latter.
+        # tsconfig files are JSONC by convention; tsc accepts the comments.
+        exclude: |
+          (?x)^(
+            (config/agent|tests/fixtures/configs/[^/]+)/(integrations/)?mcp\.json
+            |services/ui/tsconfig(\.[a-z]+)?\.json
+          )$
+      - id: check-toml
+      - id: detect-private-key
+        # The hook matches the PEM header, not key material. These two
+        # test the interface's own outgoing-secret scanner, so the
+        # header is the input: one passes `'-----BEGIN RSA PRIVATE
+        # KEY-----\nabc'` and the other asserts on an excerpt of it.
+        # Checked for real key bodies before excluding — neither file,
+        # nor any of the 442 in that directory, holds a base64 run
+        # over forty characters.
+        exclude: |
+          (?x)^(
+            tests/
+            |services/ui/src/frontend/lib/scan-outgoing\.test\.ts
+            |services/ui/src/frontend/lib/secret-warning-view\.test\.ts
+          )
+
+  # Secret detection (same approach as usernaut / template-ui)
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.28.0
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Matched to the `ruff==` pin in pyproject.toml. It was
+    # v0.12.2 against 0.17.0 — five minor versions apart, so the
+    # hook and a developer's own `ruff` disagreed about the code
+    # and whichever ran last won. `tests/unit/
+    # test_toolchain_agrees.py` fails when they drift again.
+    rev: v0.17.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+        exclude: ^tests/
+      - id: ruff-format
+
+  # Local, not mirrors-mypy: that runs in an isolated env with none of the
+  # project's dependencies, so every `agent.src.*` and third-party import
+  # resolves to Any and `warn_return_any` fires on ~180 correct returns.
+  # Checking against the real environment is the only way the results mean
+  # anything. Config, including the paths, lives in `[tool.mypy]`.
+  #
+  # `.venv/bin/mypy`, not `mypy`: with `language: system` the entry is
+  # looked up on PATH, and mypy is installed in the project venv. Anyone
+  # who had not activated it got "Executable `mypy` not found" and an
+  # aborted commit — the hook that is meant to check the real
+  # environment could not find it.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: .venv/bin/mypy
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true
+
+
+  - repo: https://github.com/PyCQA/pydocstyle
+    rev: 6.3.0
+    hooks:
+      - id: pydocstyle
+        args: [--convention=google]
+        exclude: ^tests/
+
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.8.6
+    hooks:
+      - id: bandit
+        args: [ "-lll" ] # only report high severity
+        exclude: ^tests/

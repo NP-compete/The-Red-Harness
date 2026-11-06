@@ -1,0 +1,33 @@
+# The interface's Service — and only its Service.
+#
+# **There is no UI Deployment here.** One container serves both
+# roles in this environment: the agent pod runs `harness all`,
+# which supervises the agent and the interface as children and
+# takes both down if either exits. Two pods to run one product is
+# a cost a local cluster should not pay, and a second Deployment
+# scaled to zero would still be an object asserting the UI is a
+# separate workload.
+#
+# The Service survives because the ingress routes `ui.localhost`
+# to a Service named `ui` on 8080. It now selects the agent pod,
+# so the ingress needed no change at all.
+#
+# Production is different and deliberately so: one role per
+# container, so probes, signals and the per-pod in-flight gauge
+# each mean one thing. `serve.py` says as much when `all` starts.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  labels:
+    app: template-agent
+    component: ui
+spec:
+  selector:
+    component: agent
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  type: ClusterIP

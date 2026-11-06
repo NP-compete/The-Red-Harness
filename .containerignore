@@ -1,0 +1,95 @@
+# Virtual environments (LARGEST - exclude first!)
+.venv/
+# The ui stage runs its own npm ci; a local install is 3.5GB of
+# build context that nothing copies.
+node_modules/
+ui/node_modules/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Git and version control
+.git/
+.gitignore
+.gitlab-ci.yml
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+*.so
+*.egg
+*.whl
+
+# IDE and editor files
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Development and documentation
+README.md
+LICENSE
+Makefile
+.pre-commit-config.yaml
+deployment/
+# …except the CA the image has to trust. Internal MCP servers
+# present certificates signed by it, and the runtime stage
+# appends it to certifi. Excluded by `deployment/` above, which
+# only started mattering when the build context moved from the
+# parent directory to this repository — the pattern had never
+# matched anything before.
+!deployment/certs/
+examples/
+docs/
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+
+# Environment files
+.env
+.env.*
+
+# Test files
+tests/
+
+# Type checking and linting caches
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+build.log
+
+# Lock files (use pyproject.toml instead)
+uv.lock
+poetry.lock
+Pipfile.lock
+
+# Security scan reports
+bandit-report.json
+safety-report.json
+.safety-project.ini
+
+# Container files themselves
+Containerfile
+.containerignore
+compose.yaml
+docker-compose.yml

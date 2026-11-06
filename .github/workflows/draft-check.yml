@@ -1,0 +1,24 @@
+name: Draft Check
+
+on:
+  pull_request:
+    branches: [main, deep-agent]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+
+# The job reads the pull request's draft flag and writes nothing.
+# Declared rather than inherited, because an inherited default is
+# whatever the repository setting happens to be today.
+permissions:
+  contents: read
+
+jobs:
+  draft-check:
+    name: Not Draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Fail if draft
+        if: github.event.pull_request.draft == true
+        run: |
+          echo "::error::This PR is still in draft. Mark it as ready for review before merging."
+          exit 1

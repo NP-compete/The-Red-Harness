@@ -1,0 +1,197 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main, deep-agent ]
+  pull_request:
+    branches: [ main, deep-agent ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Four checks this repository already had as Makefile targets and
+  # the pipeline never ran: a drifted deployment overlay, a broken
+  # OpenAPI contract, a configuration tree the models would refuse
+  # and a manifest failing its OpenShift constraints all merged
+  # green. Each is `make <target>` and nothing else, so the list a
+  # developer runs with `make ci` and the list CI runs are the same
+  # list (E26-T2).
+  #
+  # Separate from the unit suite because they are seconds, not
+  # minutes: a contract break should not wait behind coverage
+  # instrumentation to be reported.
+  checks:
+    name: Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # Full history, for the secret scan. `gitleaks git --log-opts=--all`
+      # reads every commit this branch can see; at the default depth of
+      # one it finds nothing and says so cheerfully. This used to be a
+      # job of its own partly to keep the history away from a runner
+      # that installs pull-request dependencies — nothing is installed
+      # on the runner any more, so that reason has gone with it.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Every check is a Dagger function in `ci/`: the Python suite,
+      # the interface's lint, unit tests, i18n and contract guards,
+      # its build and its Playwright run, pre-commit, gitleaks, the
+      # image scan and the integration tier with its own Postgres,
+      # Redis and agent. There is one definition and one container,
+      # so this runs the identical command a developer runs — not an
+      # equivalent list, and not a shell script that drifted from one.
+      # Not a check — runner housekeeping, and it earns its place.
+      # The engine keeps a snapshot per layer, and twenty pipelines
+      # over a tree with spaCy's `en_core_web_lg` in it will fill
+      # 14 GB. When it does, the failure is not "out of disk": it is
+      # nine checks reporting as broken, which is a bad hour.
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          docker image prune --all --force
+          df -h /
+
+      - name: Install Dagger
+        run: make dagger-install
+
+      - name: Run the checks
+        run: make ci
+
+      # Only when something failed, and only to look at. Playwright
+      # fails on a runner in ways it does not fail on a laptop, and
+      # "Test timeout of 60000ms exceeded" is not enough to act on —
+      # the trace is. `continue-on-error`, not `|| true`: a step that
+      # cannot fail should say so where the reader can see it.
+      - name: Keep the Playwright report
+        if: failure()
+        continue-on-error: true
+        run: .local/bin/dagger -m ci call e-2-e-report export --path=playwright-report
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure() && hashFiles('playwright-report/**') != ''
+        continue-on-error: true
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+  compose-tier:
+    name: Integration (compose)
+    runs-on: ubuntu-latest
+    # Sixty, not thirty, and the reason matters more than the number.
+    # This job reported success for months without running anything:
+    # `ci-compose` probed the agent's health endpoint and printed
+    # "skipped: no agent at …" when it could not reach one, exiting
+    # 0. The agent could never start — `MCP_TOKEN_ENCRYPTION_KEY` was
+    # not set — so the probe always failed and the tier always
+    # skipped. These ninety-one tests have not run in CI before now.
+    # They do, and they are slow; `--durations` in the function says
+    # which ones.
+    timeout-minutes: 60
+
+    # No `services:` block any more, and no `aegra dev &` followed by
+    # a `for _ in $(seq 1 60)` health poll. `compose_tier` binds its
+    # own Postgres, Redis and agent, so this is the same execution a
+    # laptop gets from `make ci-compose` — which, before this, was a
+    # target that skipped itself unless you had brought a compose
+    # network up by hand.
+    #
+    # A job of its own rather than one more function inside `make ci`:
+    # it is minutes slower than the rest together, and one slow thing
+    # inside `ci` delays every answer in it.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Dagger
+        run: make dagger-install
+
+      - name: Integration tier
+        run: make ci-compose
+
+  kind-tier:
+    name: Cluster (kind)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # Deployment-affecting paths only. A cluster is minutes; running
+    # one for a change to a docstring is how a pipeline becomes
+    # something people wait for rather than something that tells
+    # them anything. The e2e tier runs on every merge regardless —
+    # see `required-checks.yml`.
+    if: >-
+      github.event_name == 'push' ||
+      contains(github.event.pull_request.labels.*.name, 'deployment')
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      with:
+        persist-credentials: false
+
+    - name: Setup Python with uv
+      uses: ./.github/actions/setup-python-uv
+      with:
+        python-version: "3.14"
+
+    # Installed rather than taken from a third-party action, and
+    # the reason is worth stating: this file was written without
+    # network access, so a `uses:` line here would carry a commit
+    # SHA nobody had verified — which looks exactly like a pinned
+    # action and is not one. A version in a URL is a claim
+    # somebody can check.
+    #
+    # TODO: add the release checksum. It needs a network to
+    # obtain, and an unverified download is the remaining gap in
+    # this job (E26-T8).
+    - name: Install kind
+      run: |
+        curl -fsSLo /usr/local/bin/kind \
+          https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64
+        chmod +x /usr/local/bin/kind
+
+    - name: Create the cluster
+      run: kind create cluster --name template-agent --wait 120s
+
+    # One image, both roles (E10 strand D). The context is the
+    # directory above both checkouts, so the interface has to be
+    # beside the agent — which it is once this repository holds
+    # both (E10 strand B).
+    - name: Build and load the image
+      run: |
+        cd .. && podman build -f template-agent/Containerfile --target runtime -t harness:local .
+        podman save harness:local -o /tmp/harness.tar
+        kind load image-archive /tmp/harness.tar --name template-agent
+
+    - name: Deploy
+      run: |
+        kubectl create namespace template-agent
+        kubectl apply -k deployment/overlays/kind/
+        make kind-seed-config
+        kubectl -n template-agent rollout status deployment/agent --timeout=300s
+        kubectl -n template-agent rollout status deployment/ui --timeout=300s
+
+    - name: Cluster tier
+      run: make ci-kind
+
+    # What the cluster said, when it said no. A failed cluster job
+    # whose logs are gone is a job people disable.
+    - name: What the cluster was doing
+      if: failure()
+      run: |
+        kubectl -n template-agent get pods -o wide
+        kubectl -n template-agent describe pods
+        kubectl -n template-agent logs -l component=agent --tail=100 || true
+        kubectl -n template-agent logs -l component=ui --tail=100 || true

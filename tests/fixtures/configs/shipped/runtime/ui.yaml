@@ -1,0 +1,154 @@
+# UI Settings
+#
+# All feature flags, tuning knobs, and behavioral configuration for the frontend BFF.
+# Template users configure everything here — no environment variables needed
+# for UI behavior. Env vars are only for secrets and infrastructure endpoints.
+#
+# OpenShift notes:
+#   - Secrets (cookie signing key, OAuth credentials) come via OpenShift Secrets → env vars.
+#   - Infrastructure endpoints (agent host, Redis host, OTEL collector) come via ConfigMaps → env vars.
+#   - This file is mounted as a ConfigMap into the UI pod.
+
+# --- Server ---
+server:
+  host: "0.0.0.0"
+  port: 8080
+  body_limit: 1048576       # Max request body size in bytes (1MB)
+
+# --- Logging ---
+logging:
+  level: info                # debug | info | warn | error | silent
+
+# --- CORS ---
+cors:
+  origin: "http://localhost:5173"   # Allowed origin (set to your frontend URL in prod)
+
+# --- Security ---
+security:
+  helmet:
+    enabled: true
+    csp:
+      default_src: ["'self'"]
+      script_src: ["'self'", "'unsafe-inline'"]      # unsafe-inline needed for HTML shell <script> blocks
+      style_src: ["'self'", "'unsafe-inline'"]        # PatternFly injects inline styles
+      img_src: ["'self'", "data:", "blob:"]
+      connect_src: ["'self'"]
+      font_src: ["'self'", "data:"]
+      object_src: ["'none'"]
+      frame_src: ["'self'"]                          # MCP Apps sandbox proxy iframe
+      frame_ancestors: ["'none'"]
+    cross_origin_embedder_policy: false               # Must be false — breaks SSE streaming
+
+  rate_limit:
+    enabled: true
+    # A chat UI is chattier than a REST client: a cold page load is
+    # dozens of hashed chunks, and streaming, thread-state polling
+    # and uploads stack on top. This was 100 and tripped during
+    # ordinary use with "retry in 4 seconds".
+    max: 600                 # Max requests per window per user
+    window: "1 minute"       # Time window
+    exclude_paths:           # Paths exempt from rate limiting
+      - "/api/health"
+      - "/_health"
+      - "/api/proxy/agent/evals/status"
+      - "/api/proxy/agent/evals/results"
+      - "/api/proxy/agent/evals/history"
+      - "/api/proxy/agent/evals/trends"
+
+  session:
+    secure_cookie: false     # Set true in production (requires HTTPS)
+    max_age_days: 30         # Session cookie max age
+
+# --- Observability ---
+otel:
+  enabled: true              # Master switch — set true to activate OTEL tracing
+  service_name: "template-ui"
+
+# --- Features ---
+features:
+  mcp_apps_enabled: true     # Serve /sandbox_proxy.html for MCP Apps host rendering
+
+# --- Announcement Banner ---
+announcement:
+  enabled: true
+  message: "Welcome to the Agent Template Demo — all features enabled"
+  type: info                 # info | warning | danger | success
+
+# ── Merged from the interface's own config tree ──────────────────
+# `ui/config/ui/settings.yaml` was template-ui's default settings
+# file; this one is what the deployed interface actually reads
+# (`UI_CONFIG_PATH`). The two had five keys in common and each had
+# keys the other lacked, so the deployed file had been running
+# without `branding`, `content` and `quick_prompts` and falling
+# back to code defaults for them.
+#
+# Values already set above win: this file is the deployed truth.
+# What follows is only what it did not have.
+
+branding:
+  title: "Workpilot"
+  version: "v1.0.0"
+  # Local by default. An off-origin URL is supported and the BFF
+  # widens `img-src` to match it (see `server.ts`), but shipping one
+  # as the default makes every deployment fetch a third-party asset
+  # on first paint and relaxes the policy for everybody. Point these
+  # at your own CDN per deployment if you want that.
+  logo_url: "/dist/frontend/workpilot-logo.jpg"
+  favicon_url: "/dist/frontend/workpilot-logo.jpg"
+  colors:
+    light:
+      primary: "#0066cc"
+      accent: "#a60000"
+      background: "#ffffff"
+      foreground: "#1a1a1a"
+    dark:
+      primary: "#4dabf7"
+      accent: "#f56e6e"
+      background: "#0a1628"
+      foreground: "#f0f4f8"
+
+# Landing copy. `{agent}` and `{user}` are substituted at render time;
+# `{user}` is empty when nobody is signed in, so greeting_anonymous is used.
+content:
+  greeting: "Hey {user}! 👋"
+  greeting_anonymous: "Hey there! 👋"
+  subtitle: "{agent} is ready to help. What would you like to explore today?"
+  quick_prompts_heading: "Let's try some quick prompts 🚀"
+  # Set to [] to drop the starter buttons entirely.
+  quick_prompts:
+    - "What can {agent} do for me?"
+    - "Help me analyze a dataset"
+    - "Write a query to find anomalies"
+    - "Summarize the key findings from this data"
+  input_placeholder: "Ask {agent} anything..."
+  welcome_heading: "Welcome to {agent}!"
+  welcome_subtitle: "How can I help you today?"
+
+agent:
+  endpoint: ""
+  timeout_ms: 30000
+  streaming: true
+  # Show what delegated subagents are doing while they do it.
+  # A `task` call is otherwise opaque: the orchestrator waits, the
+  # subagent works for a minute or more, and the reader sees only a
+  # spinner. Rendered as a progress line, never as transcript
+  # content. Turn off to keep the machinery out of sight.
+  stream_subgraphs: true
+
+quick_prompts:
+  - What can Agent do for me?
+  - Help me analyze a dataset
+  - Write a query to find anomalies
+  - Summarize the key findings from this data
+
+platform:
+  opa:
+    enabled: false
+    policy_path: ""                        # Path to .rego policy directory (default: config/compliance/)
+    fail_on_violation: false               # Block startup if policy violations are found
+    approved_auth_providers: []            # e.g. ["oidc", "saml"] — empty = allow all
+    internal_endpoint_suffixes: []         # e.g. [".internal.example.com", ".svc.cluster.local"]
+    max_session_ttl_days: 0               # 0 = no limit
+    restrict_debug_mode: false             # Deny debug_mode_default = true
+    restricted_features: []                # Feature flag keys that must be false
+    max_rate_limit: 0                      # 0 = no cap on rate_limit.max

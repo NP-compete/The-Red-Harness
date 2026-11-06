@@ -1,0 +1,161 @@
+# Managed by eval sidecar — use POST /evals/cases to add cases.
+
+- conversation_group_id: bmi_calculate_tool_call
+  description: Verify orchestrator delegates to analyst and returns correct BMI with health tips
+  tag: tool_use
+  turns:
+  - turn_id: ask_bmi
+    query: "I'm 175 cm and weigh 70 kg. What is my BMI?"
+    expected_response: |
+      BMI is approximately 22.9, classified as Normal weight (18.5–24.9).
+      Includes health tips and a disclaimer about consulting a professional.
+    expected_keywords:
+      - ["22.9", "22.8", "23.0"]
+      - ["Normal"]
+    expected_tool_calls:
+      - - tool_name: calculate_bmi
+          arguments:
+            height_cm: 175
+            weight_kg: 70
+    turn_metrics:
+      - custom:answer_correctness
+      - custom:keywords_eval
+      - custom:tool_eval
+      - ragas:faithfulness
+      - geval:tone_safety
+    turn_metrics_metadata:
+      custom:tool_eval:
+        ordered: false
+        full_match: false
+
+- conversation_group_id: hitl_bmi_email_approval
+  description: "Agent calculates BMI from provided data then pauses for human approval before emailing results"
+  tag: hitl
+  turns:
+  - turn_id: bmi_and_email_request
+    hitl: true
+    query: "I am 175 cm tall and weigh 70 kg. Calculate my BMI and email the results to user@example.com"
+    expected_response: |
+      Agent has enough data to act and requests approval before sending the email
+      or validating the email address. The response should pause and ask the user
+      to confirm before proceeding with the email delivery.
+    expected_intent: "request approval to execute tool"
+    turn_metrics:
+      - custom:intent_eval
+
+- conversation_group_id: multi_turn_incremental_intake_and_email
+  description: Multi-turn — user gives height only, agent asks for weight, user supplies it, BMI is calculated, user then requests email delivery
+  tag: multi_turn
+  turns:
+  - turn_id: height_only
+    query: "Hi, I'm 175 cm tall. Can you check my BMI?"
+    expected_response: |
+      Agent acknowledges the height but cannot yet calculate BMI.
+      Asks the user to provide their weight (in kg or lbs) to proceed.
+    expected_keywords:
+      - ["weight", "weigh"]
+    turn_metrics:
+      - custom:answer_correctness
+      - custom:keywords_eval
+  - turn_id: provide_weight
+    query: "My weight is 70 kg"
+    expected_response: |
+      BMI is approximately 22.9, classified as Normal weight (18.5–24.9).
+      Includes health tips and a disclaimer about consulting a professional.
+      The agent remembered the height of 175 cm from the previous turn.
+    expected_keywords:
+      - ["22.9", "22.8", "23.0"]
+      - ["Normal"]
+    turn_metrics:
+      - custom:answer_correctness
+      - custom:keywords_eval
+      - ragas:faithfulness
+  conversation_metrics:
+    - deepeval:knowledge_retention
+
+- conversation_group_id: long_thread_recall_after_shortening
+  description: >
+    A fact given in the first turn is asked for again after the conversation has
+    grown long enough to be shortened. Checks that summarising the oldest turns
+    away does not lose what was in them. The filler turns ask for long answers on
+    purpose — length is what pushes the conversation past the threshold, and a
+    version of this case with short turns passes without testing anything.
+  tag: multi_turn
+  # The premise. If the conversation is never shortened the case is failed with
+  # that as the reason, rather than passing because the agent simply remembered
+  # everything a window it never filled.
+  requires_shortening: true
+  turns:
+  - turn_id: state_the_fact
+    query: >
+      Before we start, note this for later: the incident bridge for the Helsinki
+      region is +358 9 4241 7788 and the escalation owner is Marta Lindqvist.
+    expected_response: |
+      Agent acknowledges and confirms it has noted the bridge number and owner.
+    turn_metrics: []
+  - turn_id: filler_retrieval
+    query: >
+      Explain in detail how retrieval-augmented generation works, covering
+      chunking, embedding, vector search and reranking, with the trade-offs of
+      each stage.
+    turn_metrics: []
+  - turn_id: filler_consistency
+    query: >
+      Now explain eventual consistency in distributed databases in detail,
+      including read-your-writes, monotonic reads, and how each is usually
+      implemented.
+    turn_metrics: []
+  - turn_id: filler_tls
+    query: >
+      Walk through a TLS 1.3 handshake step by step, naming each message and what
+      it establishes, and explain what changed from TLS 1.2 and why.
+    turn_metrics: []
+  - turn_id: filler_scheduling
+    query: >
+      Describe how a Kubernetes scheduler places a pod, covering filtering,
+      scoring, affinity, taints and tolerations, and preemption, in detail.
+    turn_metrics: []
+  - turn_id: filler_indexes
+    query: >
+      Compare B-tree, hash, GiST and BRIN indexes in a relational database at
+      length — what each is good at, what it costs to maintain, and when picking
+      the wrong one hurts most.
+    turn_metrics: []
+  - turn_id: filler_backpressure
+    query: >
+      Explain backpressure in streaming systems in detail: where it comes from,
+      how it is signalled, and the failure modes of handling it badly.
+    turn_metrics: []
+  - turn_id: filler_caching
+    query: >
+      Describe cache invalidation strategies in depth — write-through,
+      write-behind, TTL and explicit invalidation — and the consistency each one
+      actually gives you.
+    turn_metrics: []
+  - turn_id: filler_tracing
+    query: >
+      Explain distributed tracing in detail: spans, context propagation,
+      sampling strategies, and what each sampling choice costs you when you are
+      debugging a rare fault.
+    turn_metrics: []
+  - turn_id: filler_consensus
+    query: >
+      Explain the Raft consensus algorithm in detail, covering leader election,
+      log replication, and how it handles a partitioned leader.
+    turn_metrics: []
+  - turn_id: recall_the_fact
+    query: >
+      Going back to the very start of our conversation — what is the incident
+      bridge number for the Helsinki region, and who is the escalation owner?
+    expected_response: |
+      The incident bridge for the Helsinki region is +358 9 4241 7788 and the
+      escalation owner is Marta Lindqvist. The agent recalls both correctly
+      despite the earliest turns having been summarised away.
+    expected_keywords:
+      - ["+358 9 4241 7788", "358 9 4241 7788", "+358942417788"]
+      - ["Marta", "Lindqvist"]
+    turn_metrics:
+      - custom:answer_correctness
+      - custom:keywords_eval
+  conversation_metrics:
+    - deepeval:knowledge_retention

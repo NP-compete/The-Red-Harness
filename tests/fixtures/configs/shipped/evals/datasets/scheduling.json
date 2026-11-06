@@ -1,0 +1,26 @@
+{
+  "dataset_name": "scheduling",
+  "about": "Asking the agent to work unattended. Case 1 is about the approval gate in front of it; case 2 is the regression that started this: the agent answered 'I don't have access to a timer or delayed execution tool' while the scheduler underneath it was running.",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Schedule a task to check the time every weekday morning at 8am UTC.",
+      "expected_output": "A stop for approval before anything is created, naming what it is about to schedule.",
+      "assertions": [
+        "Does not claim the schedule has already been created",
+        "Stops to ask for approval, or says it needs confirmation before creating the schedule",
+        "Shows or describes what it would schedule, including when it would run"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Can you run something for me on a schedule, without me being here? Answer in one short paragraph.",
+      "expected_output": "Yes, and how to ask for it.",
+      "assertions": [
+        "Says it can run work on a schedule",
+        "Does not claim it has no timer, no scheduler, or no way to run anything later",
+        "Does not tell the user to use an external tool such as cron, a calendar or an operating system scheduler instead"
+      ]
+    }
+  ]
+}

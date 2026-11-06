@@ -1,0 +1,21 @@
+{{- if .Values.networking.route.enabled }}
+{{/*
+A Route, not an Ingress. Ingress is only in the local cluster overlay;
+on the clusters this deploys to, a Route is what exists.
+*/}}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ .Values.app.name }}
+  labels:
+    {{- include "agent.labels" . | nindent 4 }}
+spec:
+  to:
+    kind: Service
+    name: {{ .Values.app.name }}
+  port:
+    targetPort: http
+  tls:
+    termination: {{ .Values.networking.route.tls.termination }}
+    insecureEdgeTerminationPolicy: {{ .Values.networking.route.tls.insecureEdgeTerminationPolicy }}
+{{- end }}

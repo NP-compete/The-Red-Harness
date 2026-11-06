@@ -1,0 +1,77 @@
+# Read the agent's own runs once a week and write the proposals (E12-T7).
+#
+# Weekly, not nightly. The input is a window of real conversations
+# and the output is read by a person; a daily job produces the same
+# observations with a smaller sample and trains whoever reads it to
+# skip the mail.
+#
+# **It only reads.** The script mines conversations over the public
+# API, generates the proposals a rule can produce, weighs each one
+# against the runs behind it, and writes them out. It does not edit
+# configuration, does not touch a repository, and has no credential
+# to do either.
+#
+# **Its log is the artefact.** `--print` puts every body in the job
+# log, which is the only durable sink a pod has by default. Mount a
+# PVC at /artefacts and point `--out` at it if the reviews should
+# outlive the log retention — deliberately not done here, because a
+# volume nobody reads is worse than a log somebody greps.
+#
+# **A quiet week still writes an index.** A scheduled job that
+# leaves nothing behind when it finds nothing is indistinguishable
+# from one that did not run.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: agent-improvement
+  labels:
+    app: agent
+    component: agent-improvement
+spec:
+  # Monday morning, before anybody looks.
+  schedule: "0 6 * * 1"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # Bounded. Reading a few hundred conversations is minutes;
+      # anything longer is a loop, and a weekly job that hangs is
+      # one nobody notices until the next Monday.
+      activeDeadlineSeconds: 900
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: improvement
+              # The agent's own image: the script lives beside the
+              # code it reads, and a second image would drift from it.
+              image: agent:latest
+              command:
+                - python
+                - scripts/dev/write_review.py
+              args:
+                - --url=http://agent:5002
+                - --out=/tmp/improvement
+                - --limit=300
+                - --print
+              env:
+                - name: UI_BASE_URL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: agent-config
+                      key: UI_BASE_URL
+                      optional: true
+              securityContext:
+                runAsNonRoot: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop:
+                    - ALL
+              resources:
+                requests:
+                  memory: "256Mi"
+                  cpu: "50m"
+                limits:
+                  memory: "512Mi"

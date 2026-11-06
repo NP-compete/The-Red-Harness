@@ -1,0 +1,379 @@
+name: Build and Push Base Image
+
+on:
+  push:
+    tags:
+      - '*'
+    branches:
+      - main
+      - deep-agent
+  pull_request:
+    branches: [ main, deep-agent ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'tests/**'
+  workflow_dispatch:
+
+# Read at the top, written only where writing happens. The five
+# write scopes below used to sit here, which gave them to every job
+# in the file — one job today, and the next one added would have
+# inherited the lot without anybody choosing that.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write        # the GitHub Release, on a tag
+      packages: write        # ghcr.io
+      security-events: write # the SARIF upload
+      id-token: write        # cosign and provenance, via OIDC
+      attestations: write    # the provenance attestation itself
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Hardened as the interface's copy already was.
+          # Not done in tag.yml, which pushes a tag and
+          # needs the credential it would drop.
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Log in to GitHub Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        if: github.event_name != 'pull_request'
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix={{branch}}-,enable=${{ !startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/pull/') }}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+
+      - name: Extract version for deployment package
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          elif [[ "${{ github.ref }}" == refs/pull/* ]]; then
+            VERSION="pr-${{ github.event.pull_request.number }}-${GITHUB_SHA::7}"
+          else
+            BRANCH="${GITHUB_REF#refs/heads/}"
+            BRANCH_SAFE="$(echo "$BRANCH" | sed 's/[^a-zA-Z0-9._-]/-/g; s/^-//; s/-$//' | cut -c1-60)"
+            VERSION="${BRANCH_SAFE}-${GITHUB_SHA::7}"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "package_name=deployment.zip" >> $GITHUB_OUTPUT
+
+      - name: Install Dagger
+        run: make dagger-install
+
+      # The build-and-scan half is `dagger call`, like every other
+      # check. It used to be `docker/build-push-action` with
+      # `load: true` followed by four `trivy-action` steps pointed at
+      # the tag it left in the daemon — five steps that depended on
+      # the runner having a daemon with the right thing in it, and
+      # that nobody could run before pushing. `make image-scan` is
+      # now the same execution on a laptop.
+      #
+      # The push below is still buildx: it needs registry
+      # credentials and two platforms, and the provenance attestation
+      # has no Dagger equivalent that GitHub will accept.
+      - name: Scan image for vulnerabilities
+        run: make image-scan
+
+      - name: Generate SBOM
+        continue-on-error: true
+        run: .local/bin/dagger -m ci call image-sbom export --path=sbom.cdx.json
+
+      - name: Upload SBOM
+        if: always() && hashFiles('sbom.cdx.json') != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-${{ steps.version.outputs.version }}
+          path: sbom.cdx.json
+          retention-days: 90
+
+      - name: Generate SARIF report
+        if: always()
+        continue-on-error: true
+        run: .local/bin/dagger -m ci call image-sarif export --path=trivy-results.sarif
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@e0647621c2984b5ed2f768cb892365bf2a616ad1 # v4
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Upload Trivy report as artifact
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-report-${{ steps.version.outputs.version }}
+          path: trivy-results.sarif
+          retention-days: 30
+
+      - name: Push multi-platform image
+        if: github.event_name != 'pull_request'
+        id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: ./Containerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+
+      - name: Verify pushed image is pullable
+        if: github.event_name != 'pull_request'
+        run: |
+          docker pull ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}
+          echo "Image pull verified successfully"
+
+      - name: Sign image with cosign
+        if: github.event_name != 'pull_request'
+        id: sign
+        continue-on-error: true
+        run: |
+          for attempt in 1 2 3; do
+            if cosign sign --yes --recursive \
+              ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}; then
+              echo "signed=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "Signing attempt $attempt failed, retrying in 10s..."
+            sleep 10
+          done
+          echo "signed=false" >> $GITHUB_OUTPUT
+          echo "::warning::Image signing failed after 3 attempts. Image was pushed but is unsigned."
+          exit 1
+
+      - name: Verify cosign signature
+        if: github.event_name != 'pull_request' && steps.sign.outputs.signed == 'true'
+        run: |
+          cosign verify \
+            --certificate-identity-regexp="https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+            ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}
+          echo "Signature verification passed"
+
+      - name: Attest build provenance
+        id: attest
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      # CI-6: "a release produces a signed image with an SBOM and
+      # build provenance". Each of those three steps is
+      # `continue-on-error`, which is right — they are flaky against
+      # a registry and worth retrying — but nothing failed the build
+      # when they did not happen.
+      #
+      # The signature looked guarded and was not: `Verify cosign
+      # signature` is conditional on `steps.sign.outputs.signed ==
+      # 'true'`, so a failed signing skips its own verification. The
+      # guard ran exactly when it was not needed. The SBOM and the
+      # provenance had no verification at all.
+      #
+      # One hard gate for all three, so a release that is missing any
+      # of them fails here instead of shipping green.
+      - name: A release carries its signature, SBOM and provenance
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          missing=""
+          [ "${{ steps.sign.outputs.signed }}" = "true" ] || missing="$missing signature"
+          [ -s sbom.cdx.json ] || missing="$missing sbom"
+          [ "${{ steps.attest.outcome }}" = "success" ] || missing="$missing provenance"
+          if [ -n "$missing" ]; then
+            echo "::error::this release is missing:$missing — CI-6 requires all three"
+            exit 1
+          fi
+          echo "signed, SBOM present, provenance attested"
+
+      - name: Create deployment package metadata
+        if: github.event_name != 'pull_request'
+        run: |
+          cat > deployment/release-info.json <<EOF
+          {
+            "version": "${{ steps.version.outputs.version }}",
+            "git_ref": "${{ github.ref }}",
+            "git_sha": "${{ github.sha }}",
+            "build_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "container_image": "ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}",
+            "container_digest": "${{ steps.push.outputs.digest }}",
+            "signed": ${{ steps.sign.outputs.signed || false }},
+            "repository": "${{ github.repository }}"
+          }
+          EOF
+          cat deployment/release-info.json
+
+      - name: Stamp image reference into deployment manifests
+        if: github.event_name != 'pull_request'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          IMAGE="ghcr.io/${{ github.repository }}"
+          cd deployment/overlays/openshift
+          kustomize edit set image agent=${IMAGE}:${VERSION}
+          echo "Stamped image ${IMAGE}:${VERSION} into deployment/overlays/openshift/kustomization.yaml"
+          grep -A3 'images:' kustomization.yaml
+
+      - name: Create deployment package
+        if: github.event_name != 'pull_request'
+        run: |
+          cd deployment
+          zip -r ../${{ steps.version.outputs.package_name }} . -x "*.git*"
+          cd ..
+          echo "Created package: ${{ steps.version.outputs.package_name }}"
+          ls -lh ${{ steps.version.outputs.package_name }}
+
+      - name: Generate checksums
+        if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'pull_request'
+        run: |
+          FILES="${{ steps.version.outputs.package_name }}"
+          [ -f sbom.cdx.json ] && FILES="$FILES sbom.cdx.json"
+          [ -f trivy-report.json ] && FILES="$FILES trivy-report.json"
+          sha256sum $FILES > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Collect release artifacts
+        if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'pull_request'
+        id: release-files
+        run: |
+          FILES="${{ steps.version.outputs.package_name }}"
+          FILES="$FILES
+          SHA256SUMS.txt"
+          [ -f sbom.cdx.json ] && FILES="$FILES
+          sbom.cdx.json"
+          [ -f trivy-report.json ] && FILES="$FILES
+          trivy-report.json"
+          # Use delimiter for multiline output
+          echo "files<<RELEASE_EOF" >> $GITHUB_OUTPUT
+          echo "$FILES" >> $GITHUB_OUTPUT
+          echo "RELEASE_EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release (for tags only)
+        if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          files: ${{ steps.release-files.outputs.files }}
+          body: |
+            ## Container Image
+
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
+            ```
+
+            **Digest:** `${{ steps.push.outputs.digest }}`
+            **Signed:** ${{ steps.sign.outputs.signed == 'true' && 'Yes' || 'No (signing failed, see workflow logs)' }}
+
+            ## Verify
+
+            ```bash
+            # Verify image signature
+            cosign verify \
+              --certificate-identity-regexp="https://github.com/${{ github.repository }}/" \
+              --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \
+              ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
+
+            # Verify build provenance
+            gh attestation verify \
+              oci://ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }} \
+              --owner ${{ github.repository_owner }}
+
+            # Verify artifact checksums
+            sha256sum -c SHA256SUMS.txt
+            ```
+
+            ## Artifacts
+
+            | File | Description |
+            |------|-------------|
+            | `deployment.zip` | Deployment manifests with release metadata |
+            | `sbom.cdx.json` | CycloneDX software bill of materials |
+            | `trivy-report.json` | Vulnerability scan results |
+            | `SHA256SUMS.txt` | SHA-256 checksums for all release artifacts |
+          draft: false
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload deployment package as artifact (for branch builds)
+        if: "!startsWith(github.ref, 'refs/tags/') && github.event_name != 'pull_request'"
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.version.outputs.package_name }}
+          path: ${{ steps.version.outputs.package_name }}
+          retention-days: 30
+
+      - name: Upload agent info artifact (for package-release workflow)
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: last-good-agent
+          path: deployment/release-info.json
+          retention-days: 30
+
+      - name: Build summary
+        if: github.event_name != 'pull_request'
+        continue-on-error: true
+        run: |
+          echo "### Base Image Built Successfully! 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** \`${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Digest:** \`${{ steps.push.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Signed:** ${{ steps.sign.outputs.signed == 'true' && 'Yes' || 'No' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Container Image Tags:**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Pull command:**" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Verify signature:**" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo 'cosign verify \' >> $GITHUB_STEP_SUMMARY
+          echo '  --certificate-identity-regexp="https://github.com/${{ github.repository }}/" \' >> $GITHUB_STEP_SUMMARY
+          echo '  --certificate-oidc-issuer="https://token.actions.githubusercontent.com" \' >> $GITHUB_STEP_SUMMARY
+          echo '  ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

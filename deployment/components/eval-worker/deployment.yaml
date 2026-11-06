@@ -1,0 +1,96 @@
+# The eval worker. Claims queued runs from Postgres and scores them.
+#
+# A different image flavour from every other role: built with
+# VENV_STAGE=deps-eval, which adds the 198MB scoring stack. That is
+# the whole reason this is its own Deployment rather than work the
+# durable worker picks up — scipy and pandas have no business in
+# the pod serving requests.
+#
+# No Temporal. The queue is the `evals` table, claimed with a
+# lease (src/evals/claims.py). An eval is idempotent, so a dead
+# worker costs time and nothing else.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eval-worker
+  labels:
+    component: evaluation
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: eval-worker
+  template:
+    metadata:
+      labels:
+        app: eval-worker
+        component: evaluation
+    spec:
+      # Service links inject AGENT_PORT and POSTGRES_PORT as
+      # tcp:// URLs, which collide with this app's own settings.
+      enableServiceLinks: false
+      # SIGTERM finishes the run in hand rather than abandoning it,
+      # and a run is minutes of model calls. The default 30s would
+      # kill it mid-eval and leave the row held until its lease
+      # expired. Matches the agent's budget; no preStop, so the
+      # process is told the whole of it.
+      terminationGracePeriodSeconds: 600
+      containers:
+        - name: eval-worker
+          image: localhost/harness:local-eval
+          args: ["eval-worker"]
+          envFrom:
+            - configMapRef:
+                name: agent-config
+            - secretRef:
+                name: agent-env
+                optional: true
+          env:
+            - name: AGENT_BASE_URL
+              value: http://agent:5002
+            # `envFrom: agent-config` carries host, port and db, but
+            # the credentials live in a Secret the agent names
+            # explicitly. Without these the worker claims a row,
+            # runs nothing, and cannot write the failure down.
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: agent-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: agent-secrets
+                  key: POSTGRES_PASSWORD
+            - name: PYTHONPATH
+              value: /app/services
+            # agent-config carries 585, which is the agent's 600
+            # grace minus its 15s preStop. This pod has no preStop,
+            # so it gets the whole 600 and must be told so.
+            - name: SHUTDOWN_GRACE_PERIOD_SECONDS
+              value: "600"
+          # The eval cases and system.yaml live on the config PVC,
+          # written there by the `config` image stage. The runtime
+          # image ships an empty /app/config/agent, so without this
+          # mount the worker reports "No eval dataset found" for
+          # every run it claims.
+          volumeMounts:
+            # `subPath: agent` as the agent does — the PVC root
+            # holds `agent/` and `ui/`, so mounting it whole puts
+            # the tree one directory too deep.
+            - name: config-volume
+              mountPath: /app/config/agent
+              subPath: agent
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              # Higher than the durable worker: pandas and scipy
+              # are resident for the whole run.
+              memory: 512Mi
+            limits:
+              memory: 3Gi
+      volumes:
+        - name: config-volume
+          persistentVolumeClaim:
+            claimName: config-pvc

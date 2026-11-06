@@ -1,0 +1,951 @@
+import { readFileSync, existsSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import yaml from "js-yaml";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+interface CspConfig {
+  default_src: string[];
+  script_src: string[];
+  style_src: string[];
+  img_src: string[];
+  connect_src: string[];
+  font_src: string[];
+  object_src: string[];
+  /** Where a service worker may be loaded from. */
+  worker_src: string[];
+  /** Where the web app manifest may be loaded from. */
+  manifest_src: string[];
+  frame_src: string[];
+  frame_ancestors: string[];
+}
+
+interface HelmetConfig {
+  enabled: boolean;
+  csp: CspConfig;
+  cross_origin_embedder_policy: boolean;
+}
+
+interface RateLimitConfig {
+  enabled: boolean;
+  max: number;
+  window: string;
+  exclude_paths: string[];
+  /**
+   * Number of reverse proxies in front of this server, or false to
+   * trust none.
+   *
+   * Without it every request's source address is the ingress pod's,
+   * so the whole deployment shares one bucket and the limit stops
+   * being per-user. With it, `request.ip` is read from the last
+   * `trust_proxy` hops of X-Forwarded-For.
+   *
+   * A number, not `true`: trusting the whole header lets a client
+   * prepend any address it likes and get a fresh bucket per request.
+   * One hop is right for an OpenShift Route or a single ingress.
+   */
+  trust_proxy: number | false;
+}
+
+interface SessionConfig {
+  secure_cookie: boolean;
+  max_age_days: number;
+  http_only: boolean;
+  same_site: 'strict' | 'lax' | 'none';
+}
+
+interface SecurityConfig {
+  helmet: HelmetConfig;
+  rate_limit: RateLimitConfig;
+  session: SessionConfig;
+}
+
+interface OtelConfig {
+  enabled: boolean;
+  service_name: string;
+}
+
+interface PlatformOpaConfig {
+  enabled: boolean;
+  policy_path: string;
+  fail_on_violation: boolean;
+  approved_auth_providers: string[];
+  internal_endpoint_suffixes: string[];
+  max_session_ttl_days: number;
+  restrict_debug_mode: boolean;
+  restricted_features: string[];
+  max_rate_limit: number;
+}
+
+interface PlatformConfig {
+  opa: PlatformOpaConfig;
+}
+
+interface AnnouncementConfig {
+  enabled: boolean;
+  message: string;
+  type: string;
+}
+
+interface ServerConfig {
+  host: string;
+  port: number;
+  body_limit: number;
+}
+
+interface LoggingConfig {
+  level: string;
+}
+
+interface CorsConfig {
+  origin: string;
+}
+
+interface BrandingThemeColors {
+  primary: string;
+  accent: string;
+  background: string;
+  foreground: string;
+}
+
+interface BrandingConfig {
+  logo_url?: string;
+  /**
+   * A logo drawn to be cropped, for the installed app icon.
+   *
+   * Separate from `logo_url` because a platform cuts a maskable
+   * icon down to roughly its middle four fifths. A logo that
+   * survives that is padded differently from one meant to be
+   * shown whole, so one image cannot be both. Left empty, no
+   * icon is declared maskable and the platform letterboxes the
+   * ordinary logo instead — less polished, and it cannot cut
+   * the product's name in half.
+   */
+  logo_maskable_url?: string;
+  title: string;
+  version: string;
+  favicon_url?: string;
+  /** `<meta name="description">` on the shell page. */
+  description?: string;
+  colors: {
+    light: BrandingThemeColors;
+    dark: BrandingThemeColors;
+  };
+}
+
+interface PwaNotificationsConfig {
+  enabled: boolean;
+  /**
+   * Where a notification is worth asking permission for.
+   *
+   * Desktop only, and that is a product decision rather than a
+   * technical limit. Prompting where delivery is unreliable teaches
+   * people the prompt is noise, and they refuse the next one too.
+   * Configuration, so a deployment can decide otherwise for itself.
+   */
+  platforms: string[];
+  events: {
+    run_complete: boolean;
+    approval_required: boolean;
+    connection_required: boolean;
+    run_failed: boolean;
+  };
+  /** Whether the thread title may appear in the body. */
+  include_detail: boolean;
+  badge: boolean;
+}
+
+interface PwaConfig {
+  enabled: boolean;
+  install_prompt: boolean;
+  manifest: {
+    /** Empty falls back to the branding title. */
+    short_name: string;
+    display: string;
+    orientation: string;
+  };
+  notifications: PwaNotificationsConfig;
+  push: {
+    enabled: boolean;
+    /** The public half only. The private key comes from a secret. */
+    vapid_public_key: string;
+  };
+}
+
+interface FeaturesConfig {
+  memory_enabled: boolean;
+  debug_mode_default: boolean;
+  auth_enabled: boolean;
+  mcp_dcr_enabled: boolean;
+  mcp_apps_enabled: boolean;
+  /**
+   * Whether the Skills tab is visible to everyone.
+   *
+   * Config rather than a Developer-panel toggle: a toggle there is
+   * per-browser localStorage, so it would change what one operator
+   * sees and nobody else — which is the opposite of deciding what
+   * *everyone* gets. A deployment-wide question needs a
+   * deployment-wide answer.
+   *
+   * When false, Skills is gated like Usage and Documents: privileged
+   * role plus developer mode.
+   */
+  skills_visible_to_all: boolean;
+  /** Same contract as `skills_visible_to_all`, for the other two
+      read-only introspection surfaces. */
+  subagents_visible_to_all: boolean;
+  prompt_visible_to_all: boolean;
+  models_visible_to_all: boolean;
+  safeguards_visible_to_all: boolean;
+}
+
+interface AgentConfig {
+  endpoint: string;
+  timeout_ms: number;
+  /**
+   * How long one streaming turn may take.
+   *
+   * Separate from `timeout_ms`, which covers ordinary request/response
+   * calls. A delegated turn is not one of those: it can run a subagent
+   * through a dozen tool calls, and a 300s ceiling cut one off mid-
+   * answer after the work had been done. Floor, not a target — the
+   * fix for a slow turn is a faster turn.
+   */
+  stream_timeout_ms: number;
+  /**
+   * What happens to a run when the browser goes away.
+   *
+   * `"continue"`: a refresh, a closed laptop or a flaky network
+   * leaves the turn running and it is there when you come back.
+   * `"cancel"` is the agent's default and means a refresh silently
+   * throws away a two-minute delegation — and the tokens it spent.
+   *
+   * With `"continue"`, stopping has to be said explicitly rather
+   * than implied by disconnecting; the client calls the run's
+   * cancel endpoint.
+   */
+  on_disconnect: "continue" | "cancel";
+  streaming: boolean;
+  /**
+   * Stream the inner workings of delegated subagents.
+   *
+   * A `task` call is opaque from outside: the orchestrator waits,
+   * the subagent works — over a hundred seconds on a three-part
+   * question — and the reader sees a spinner. With this on, the
+   * agent's nested graph events arrive namespaced and are rendered
+   * as a progress line, never as transcript content.
+   *
+   * Config rather than a constant because it is a real trade: more
+   * events on the wire, and a glimpse of machinery some deployments
+   * would rather not show.
+   */
+  stream_subgraphs: boolean;
+}
+
+interface AuthConfig {
+  enabled: boolean;
+  sso_client_id: string;
+  sso_client_secret: string;  // SECURITY: Never set in YAML - only via SSO_CLIENT_SECRET env var
+  sso_issuer_host: string;
+  sso_callback_url: string;
+}
+
+/** Landing-page copy and starter prompts.
+ *
+ * Every string supports two tokens, substituted client-side:
+ * `{agent}` (the agent's display name) and `{user}` (the signed-in user's
+ * first name, empty when anonymous). Changing the product's voice should
+ * not mean editing React.
+ */
+interface ContentConfig {
+  /** Shown when a user has a name; `{user}` resolves to it. */
+  greeting: string;
+  /** Shown when no name is available. */
+  greeting_anonymous: string;
+  /** Sub-heading under the greeting. */
+  subtitle: string;
+  /** Heading above the starter buttons. Empty string hides it. */
+  quick_prompts_heading: string;
+  /** Starter buttons. Empty array hides the whole block. */
+  quick_prompts: string[];
+  /** Placeholder in the composer. */
+  input_placeholder: string;
+  /** Large heading on the empty-thread welcome screen. */
+  welcome_heading: string;
+  /** Line under that heading. */
+  welcome_subtitle: string;
+}
+
+export interface UISettings {
+  branding: BrandingConfig;
+  content: ContentConfig;
+  features: FeaturesConfig;
+  agent: AgentConfig;
+  auth: AuthConfig;
+  server: ServerConfig;
+  logging: LoggingConfig;
+  cors: CorsConfig;
+  security: SecurityConfig;
+  otel: OtelConfig;
+  announcement: AnnouncementConfig;
+  platform: PlatformConfig;
+  /** Home-page quick prompts. Empty means the UI uses its built-in prompts. */
+  quick_prompts: string[];
+  pwa: PwaConfig;
+}
+
+const DEFAULTS: UISettings = {
+  branding: {
+    logo_url: "",
+    logo_maskable_url: "",
+    // Generic on purpose: the product name is config, not a
+    // constant. It comes from `branding.title` in
+    // config/ui/settings.yaml, and failing that from the agent's own
+    // `/info` name. A real name baked in here is one a fork has to
+    // hunt for in source. It cannot be empty — `validateConfig`
+    // rejects a blank title, so a missing config file would throw
+    // rather than fall back.
+    title: "Agent",
+    version: "v1.0.0",
+    favicon_url: "",
+    colors: {
+      light: {
+        primary: "#0066cc",
+        accent: "#a60000",
+        background: "#ffffff",
+        foreground: "#1a1a1a",
+      },
+      dark: {
+        primary: "#4dabf7",
+        accent: "#f56e6e",
+        background: "#0a1628",
+        foreground: "#f0f4f8",
+      },
+    },
+  },
+  content: {
+    greeting: "Hey {user}! 👋",
+    greeting_anonymous: "Hey there! 👋",
+    subtitle: "{agent} is ready to help. What would you like to explore today?",
+    quick_prompts_heading: "Let's try some quick prompts 🚀",
+    quick_prompts: [
+      "What can {agent} do for me?",
+      "Help me analyze a dataset",
+      "Write a query to find anomalies",
+      "Summarize the key findings from this data",
+    ],
+    input_placeholder: "Ask {agent} anything...",
+    welcome_heading: "Welcome to {agent}!",
+    welcome_subtitle: "How can I help you today?",
+  },
+  pwa: {
+    enabled: true,
+    install_prompt: true,
+    manifest: {
+      short_name: "",
+      display: "standalone",
+      orientation: "any",
+    },
+    notifications: {
+      enabled: true,
+      // Desktop only. An unlisted platform gets no prompt and no
+      // notification rather than a prompt that leads nowhere.
+      platforms: ["macOS", "Windows", "Linux"],
+      events: {
+        run_complete: true,
+        approval_required: true,
+        connection_required: true,
+        run_failed: true,
+      },
+      // A notification renders on a lock screen, so nothing from
+      // the conversation goes in it unless a deployment says so.
+      include_detail: false,
+      badge: true,
+    },
+    push: {
+      // Push goes through a browser vendor's service. That is a
+      // decision a deployment makes, not one it inherits.
+      enabled: false,
+      vapid_public_key: "",
+    },
+  },
+  features: {
+    debug_mode_default: false,
+    auth_enabled: true,
+    mcp_dcr_enabled: true,
+    mcp_apps_enabled: true,
+    // Visible by default: a capability list is the most useful thing
+    // a new user can read, and hiding it by default would make the
+    // agent's abilities discoverable only by asking it.
+    skills_visible_to_all: true,
+    subagents_visible_to_all: true,
+    prompt_visible_to_all: true,
+    models_visible_to_all: true,
+    safeguards_visible_to_all: true,
+    memory_enabled: true,
+  },
+  agent: {
+    endpoint: "",
+    timeout_ms: 30000,
+    stream_timeout_ms: 900000,
+    on_disconnect: "continue",
+    streaming: true,
+    stream_subgraphs: true,
+  },
+  auth: {
+    enabled: true,
+    sso_client_id: "",  // Always from SSO_CLIENT_ID env var
+    sso_client_secret: "",  // Always from SSO_CLIENT_SECRET env var (secret)
+    sso_issuer_host: "",  // Always from SSO_ISSUER_HOST env var
+    sso_callback_url: "",  // Always from SSO_CALLBACK_URL env var
+  },
+  server: { host: "0.0.0.0", port: 8080, body_limit: 1_048_576 },
+  logging: { level: "info" },
+  cors: { origin: "http://localhost:8080" },
+  security: {
+    helmet: {
+      enabled: true,
+      csp: {
+        default_src: ["'self'"],
+        script_src: ["'self'"],
+        style_src: ["'self'", "'unsafe-inline'"],
+        img_src: ["'self'", "data:", "blob:", "https:"],
+        connect_src: ["'self'"],
+        font_src: ["'self'", "data:"],
+        object_src: ["'none'"],
+        // A worker intercepts every request in its scope, so one
+        // loaded from anywhere else would see all of them.
+        worker_src: ["'self'"],
+        manifest_src: ["'self'"],
+        frame_src: ["'self'"],
+        frame_ancestors: ["'none'"],
+      },
+      cross_origin_embedder_policy: false,
+    },
+    rate_limit: {
+      enabled: true,
+      // A chat UI is chattier than a REST client: a single page load
+      // of /analytics is four calls, and streaming, thread-state
+      // polling and uploads stack on top. 100/min tripped during
+      // ordinary use, which trains people to ignore the error.
+      max: 600,
+      window: "1 minute",
+      exclude_paths: ["/api/health", "/_health", "/api/proxy/agent/evals/status", "/api/proxy/agent/evals/results", "/api/proxy/agent/evals/history", "/api/proxy/agent/evals/trends"],
+      trust_proxy: 1,
+    },
+    session: {
+      secure_cookie: false, // false for dev; set to true in production
+      max_age_days: 30,
+      http_only: true,
+      same_site: 'lax', // 'lax' allows OAuth2 callback flows; use 'strict' only if not using SSO
+    },
+  },
+  otel: { enabled: false, service_name: "template-ui" },
+  announcement: { enabled: false, message: "", type: "info" },
+  platform: {
+    opa: {
+      enabled: false,
+      policy_path: "",
+      fail_on_violation: false,
+      approved_auth_providers: [],
+      internal_endpoint_suffixes: [],
+      max_session_ttl_days: 0,
+      restrict_debug_mode: false,
+      restricted_features: [],
+      max_rate_limit: 0,
+    },
+  },
+  quick_prompts: [],
+};
+
+function deepMerge<T extends Record<string, unknown>>(
+  base: T,
+  override: Record<string, unknown>,
+): T {
+  const result = { ...base } as Record<string, unknown>;
+  for (const key of Object.keys(override)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+    const bVal = result[key];
+    const oVal = override[key];
+    if (
+      bVal &&
+      oVal &&
+      typeof bVal === "object" &&
+      typeof oVal === "object" &&
+      !Array.isArray(bVal) &&
+      !Array.isArray(oVal)
+    ) {
+      result[key] = deepMerge(
+        bVal as Record<string, unknown>,
+        oVal as Record<string, unknown>,
+      );
+    } else {
+      result[key] = oVal;
+    }
+  }
+  return result as T;
+}
+
+function loadYaml(filePath: string): Record<string, unknown> | null {
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, "utf-8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return null;
+    }
+    throw err;
+  }
+
+  try {
+    const parsed = yaml.load(raw) as Record<string, unknown>;
+    return parsed ?? null;
+  } catch (parseError) {
+    const msg = parseError instanceof Error ? parseError.message : String(parseError);
+    throw new Error(`Config parse error: invalid YAML in "${filePath}": ${msg}`);
+  }
+}
+
+function isValidUrl(urlString: string): boolean {
+  try {
+    new URL(urlString);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function validateConfig(config: UISettings): void {
+  const hexColorRegex = /^#[0-9A-Fa-f]{6}$/;
+
+  // Branding validation
+  if (!config.branding.title || config.branding.title.trim() === "") {
+    throw new Error("Config validation error: branding.title is required");
+  }
+
+  // Color validation
+  const validateColor = (path: string, value: string) => {
+    if (!hexColorRegex.test(value)) {
+      throw new Error(
+        `Config validation error: ${path} must be a valid hex color (got '${value}')`,
+      );
+    }
+  };
+
+  validateColor("branding.colors.light.primary", config.branding.colors.light.primary);
+  validateColor("branding.colors.light.accent", config.branding.colors.light.accent);
+  validateColor("branding.colors.light.background", config.branding.colors.light.background);
+  validateColor("branding.colors.light.foreground", config.branding.colors.light.foreground);
+  validateColor("branding.colors.dark.primary", config.branding.colors.dark.primary);
+  validateColor("branding.colors.dark.accent", config.branding.colors.dark.accent);
+  validateColor("branding.colors.dark.background", config.branding.colors.dark.background);
+  validateColor("branding.colors.dark.foreground", config.branding.colors.dark.foreground);
+
+  // Feature flags type validation
+  if (typeof config.features.debug_mode_default !== "boolean") {
+    throw new Error("Config validation error: features.debug_mode_default must be boolean");
+  }
+  if (typeof config.features.auth_enabled !== "boolean") {
+    throw new Error("Config validation error: features.auth_enabled must be boolean");
+  }
+  if (typeof config.features.mcp_apps_enabled !== "boolean") {
+    throw new Error("Config validation error: features.mcp_apps_enabled must be boolean");
+  }
+
+  // Agent config validation
+  if (config.agent.endpoint && !isValidUrl(config.agent.endpoint)) {
+    throw new Error(
+      `Config validation error: agent.endpoint must be a valid URL (got '${config.agent.endpoint}')`,
+    );
+  }
+  if (
+    typeof config.agent.stream_timeout_ms !== "number" ||
+    config.agent.stream_timeout_ms <= 0
+  ) {
+    throw new Error(
+      "Config validation error: agent.stream_timeout_ms must be a positive number",
+    );
+  }
+  if (typeof config.agent.timeout_ms !== "number" || config.agent.timeout_ms <= 0) {
+    throw new Error("Config validation error: agent.timeout_ms must be a positive number");
+  }
+  if (typeof config.agent.stream_subgraphs !== "boolean") {
+    throw new Error(
+      "Config validation error: agent.stream_subgraphs must be boolean",
+    );
+  }
+  if (typeof config.agent.streaming !== "boolean") {
+    throw new Error("Config validation error: agent.streaming must be boolean");
+  }
+
+  // Auth config validation
+  if (config.auth.enabled) {
+    if (config.auth.sso_issuer_host && !isValidUrl(config.auth.sso_issuer_host)) {
+      throw new Error(
+        `Config validation error: auth.sso_issuer_host must be a valid URL (got '${config.auth.sso_issuer_host}')`,
+      );
+    }
+    if (config.auth.sso_callback_url && !isValidUrl(config.auth.sso_callback_url)) {
+      throw new Error(
+        `Config validation error: auth.sso_callback_url must be a valid URL (got '${config.auth.sso_callback_url}')`,
+      );
+    }
+  }
+
+  // Security config validation
+  if (config.security.rate_limit.enabled) {
+    if (typeof config.security.rate_limit.max !== "number" || config.security.rate_limit.max <= 0) {
+      throw new Error("Config validation error: security.rate_limit.max must be a positive number");
+    }
+    if (!config.security.rate_limit.window || config.security.rate_limit.window.trim() === "") {
+      throw new Error("Config validation error: security.rate_limit.window is required");
+    }
+  }
+  if (typeof config.security.session.max_age_days !== "number" || config.security.session.max_age_days <= 0) {
+    throw new Error("Config validation error: security.session.max_age_days must be a positive number");
+  }
+
+  // Server config validation
+  if (typeof config.server.port !== "number" || config.server.port <= 0 || config.server.port > 65535) {
+    throw new Error("Config validation error: server.port must be between 1 and 65535");
+  }
+
+  if (!Array.isArray(config.quick_prompts)) {
+    throw new Error("Config validation error: quick_prompts must be a list of strings");
+  }
+  config.quick_prompts = config.quick_prompts.map((prompt) => {
+    const text = typeof prompt === "string" ? prompt : String(prompt);
+    if (text.trim() === "") {
+      throw new Error("Config validation error: quick_prompts entries must be non-empty strings");
+    }
+    return text;
+  });
+}
+
+function applyEnvOverrides(config: UISettings): void {
+  // Branding overrides
+  if (process.env.BRANDING_TITLE) {
+    config.branding.title = process.env.BRANDING_TITLE;
+  }
+  if (process.env.BRANDING_LOGO_URL) {
+    config.branding.logo_url = process.env.BRANDING_LOGO_URL;
+  }
+  if (process.env.BRANDING_FAVICON_URL) {
+    config.branding.favicon_url = process.env.BRANDING_FAVICON_URL;
+  }
+
+  // Branding color overrides (light theme)
+  if (!config.branding.colors) config.branding.colors = (DEFAULTS.branding.colors as typeof config.branding.colors);
+  if (!config.branding.colors.light) config.branding.colors.light = { ...DEFAULTS.branding.colors.light };
+  if (!config.branding.colors.dark) config.branding.colors.dark = { ...DEFAULTS.branding.colors.dark };
+  if (process.env.BRANDING_PRIMARY_LIGHT) config.branding.colors.light.primary = process.env.BRANDING_PRIMARY_LIGHT;
+  if (process.env.BRANDING_ACCENT_LIGHT) config.branding.colors.light.accent = process.env.BRANDING_ACCENT_LIGHT;
+  if (process.env.BRANDING_BG_LIGHT) config.branding.colors.light.background = process.env.BRANDING_BG_LIGHT;
+  if (process.env.BRANDING_FG_LIGHT) config.branding.colors.light.foreground = process.env.BRANDING_FG_LIGHT;
+  if (process.env.BRANDING_PRIMARY_DARK) config.branding.colors.dark.primary = process.env.BRANDING_PRIMARY_DARK;
+  if (process.env.BRANDING_ACCENT_DARK) config.branding.colors.dark.accent = process.env.BRANDING_ACCENT_DARK;
+  if (process.env.BRANDING_BG_DARK) config.branding.colors.dark.background = process.env.BRANDING_BG_DARK;
+  if (process.env.BRANDING_FG_DARK) config.branding.colors.dark.foreground = process.env.BRANDING_FG_DARK;
+
+  // Feature overrides — support both new FEATURE_AUTH_ENABLED and legacy AUTH_ENABLED
+  if (process.env.FEATURE_AUTH_ENABLED !== undefined) {
+    config.features.auth_enabled = process.env.FEATURE_AUTH_ENABLED === "true";
+  } else if (process.env.AUTH_ENABLED !== undefined) {
+    config.features.auth_enabled = process.env.AUTH_ENABLED === "true";
+  }
+  if (process.env.FEATURE_DEBUG_MODE_DEFAULT !== undefined) {
+    config.features.debug_mode_default = process.env.FEATURE_DEBUG_MODE_DEFAULT === "true";
+  }
+  if (process.env.MCP_DCR_ENABLED !== undefined) {
+    config.features.mcp_dcr_enabled = process.env.MCP_DCR_ENABLED === "true";
+  }
+  if (process.env.FEATURE_MCP_APPS_ENABLED !== undefined) {
+    config.features.mcp_apps_enabled = process.env.FEATURE_MCP_APPS_ENABLED === "true";
+  }
+  // Agent overrides
+  if (process.env.AGENT_ENDPOINT) {
+    config.agent.endpoint = process.env.AGENT_ENDPOINT;
+  }
+  if (process.env.AGENT_TIMEOUT_MS) {
+    const timeout = Number.parseInt(process.env.AGENT_TIMEOUT_MS, 10);
+    if (!Number.isNaN(timeout)) {
+      config.agent.timeout_ms = timeout;
+    }
+  }
+  if (process.env.AGENT_STREAM_TIMEOUT_MS) {
+    const streamTimeout = Number.parseInt(process.env.AGENT_STREAM_TIMEOUT_MS, 10);
+    if (!Number.isNaN(streamTimeout)) {
+      config.agent.stream_timeout_ms = streamTimeout;
+    }
+  }
+
+  // Auth overrides - ALL SSO config comes from environment variables (never from YAML)
+  // These are injected by agent-engine during deployment
+  if (process.env.SSO_CLIENT_ID) {
+    config.auth.sso_client_id = process.env.SSO_CLIENT_ID;
+  }
+  if (process.env.SSO_CLIENT_SECRET) {
+    config.auth.sso_client_secret = process.env.SSO_CLIENT_SECRET;
+  }
+  if (process.env.SSO_ISSUER_HOST) {
+    config.auth.sso_issuer_host = process.env.SSO_ISSUER_HOST;
+  }
+  if (process.env.SSO_CALLBACK_URL) {
+    config.auth.sso_callback_url = process.env.SSO_CALLBACK_URL;
+  }
+
+  // Security overrides - Session
+  if (process.env.SESSION_SECURE_COOKIE !== undefined) {
+    config.security.session.secure_cookie = process.env.SESSION_SECURE_COOKIE === 'true';
+  }
+  if (process.env.SECURITY_SESSION_SECURE_COOKIE !== undefined) {
+    config.security.session.secure_cookie = process.env.SECURITY_SESSION_SECURE_COOKIE === "true";
+  }
+  if (process.env.SESSION_HTTP_ONLY !== undefined) {
+    config.security.session.http_only = process.env.SESSION_HTTP_ONLY === 'true';
+  }
+  if (process.env.SESSION_SAME_SITE) {
+    const sameSite = process.env.SESSION_SAME_SITE.toLowerCase();
+    if (['strict', 'lax', 'none'].includes(sameSite)) {
+      config.security.session.same_site = sameSite as 'strict' | 'lax' | 'none';
+    }
+  }
+
+  // Platform OPA overrides
+  if (process.env.PLATFORM_OPA_ENABLED !== undefined) {
+    config.platform.opa.enabled = process.env.PLATFORM_OPA_ENABLED === "true";
+  }
+  if (process.env.PLATFORM_OPA_POLICY_PATH) {
+    config.platform.opa.policy_path = process.env.PLATFORM_OPA_POLICY_PATH;
+  }
+  if (process.env.PLATFORM_OPA_FAIL_ON_VIOLATION !== undefined) {
+    config.platform.opa.fail_on_violation = process.env.PLATFORM_OPA_FAIL_ON_VIOLATION === "true";
+  }
+  if (process.env.SECURITY_SESSION_MAX_AGE_DAYS) {
+    const days = Number.parseInt(process.env.SECURITY_SESSION_MAX_AGE_DAYS, 10);
+    if (!Number.isNaN(days)) {
+      config.security.session.max_age_days = days;
+    }
+  }
+
+  // Security overrides - CSP (for emergency rollback)
+  if (process.env.CSP_SCRIPT_SRC) {
+    config.security.helmet.csp.script_src = process.env.CSP_SCRIPT_SRC.split(' ');
+  }
+  if (process.env.CSP_CONNECT_SRC) {
+    config.security.helmet.csp.connect_src = process.env.CSP_CONNECT_SRC.split(' ');
+  }
+  if (process.env.CSP_FRAME_SRC) {
+    config.security.helmet.csp.frame_src = process.env.CSP_FRAME_SRC.split(' ');
+  }
+
+  // Security overrides - Rate limit
+  if (process.env.RATE_LIMIT_MAX) {
+    const max = Number.parseInt(process.env.RATE_LIMIT_MAX, 10);
+    if (!Number.isNaN(max)) {
+      config.security.rate_limit.max = max;
+    }
+  }
+  if (process.env.SECURITY_RATE_LIMIT_MAX) {
+    const max = Number.parseInt(process.env.SECURITY_RATE_LIMIT_MAX, 10);
+    if (!Number.isNaN(max)) {
+      config.security.rate_limit.max = max;
+    }
+  }
+  if (process.env.SECURITY_RATE_LIMIT_TRUST_PROXY) {
+    // Whole string or nothing. `parseInt` reads "1abc" as 1 and "2.5"
+    // as 2, so a typo silently changed how many proxy hops are
+    // trusted, and that count decides which address the rate limiter
+    // keys on.
+    const raw = process.env.SECURITY_RATE_LIMIT_TRUST_PROXY.trim();
+    const hops = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+    if (Number.isFinite(hops)) {
+      config.security.rate_limit.trust_proxy = hops === 0 ? false : hops;
+    } else {
+      console.warn(
+        `SECURITY_RATE_LIMIT_TRUST_PROXY is not a whole number: "${raw}"; ignoring it`,
+      );
+    }
+  }
+
+  if (process.env.SECURITY_RATE_LIMIT_WINDOW) {
+    config.security.rate_limit.window = process.env.SECURITY_RATE_LIMIT_WINDOW;
+  }
+
+  // Server overrides
+  if (process.env.PORT) {
+    const port = Number.parseInt(process.env.PORT, 10);
+    if (!Number.isNaN(port)) {
+      config.server.port = port;
+    }
+  }
+
+  // Logging override
+  if (process.env.LOG_LEVEL) {
+    config.logging.level = process.env.LOG_LEVEL;
+  }
+}
+
+/**
+ * Refuse a `UI_CONFIG_PATH` that is not plausibly a config file.
+ *
+ * The only check used to be `existsSync`, which accepts *any* file
+ * that happens to be there. `config/ui/../../.env` resolves to the
+ * repo's real `.env`: it exists, so it was read as settings, failed to
+ * parse as the expected shape, and silently fell back to defaults. No
+ * secret leaked — nothing echoes the parsed file back — but "it
+ * exists" is not the property worth checking, and a config loader that
+ * reads whatever you point it at is one bug away from being the
+ * property that matters.
+ *
+ * Two rules, both portable:
+ *
+ * - **No upward traversal.** A deployment points at a mounted file by
+ *   its own path; it never needs to climb out of a directory to find
+ *   it. Checked on the raw string, because a `..` that resolves to
+ *   somewhere legitimate is still a sign the value was built by
+ *   joining untrusted pieces.
+ * - **Must be YAML.** Every real value in this repo — Containerfile,
+ *   compose.yml, env.template, the Kind overlay — ends in
+ *   `settings.yaml`. `/etc/shadow` and `.env` do not, and on a Linux
+ *   container `/etc/shadow` exists, so the existence check alone would
+ *   wave it through.
+ */
+function assertUsableConfigPath(raw: string): void {
+  const segments = raw.split(/[\\/]+/);
+  if (segments.includes("..")) {
+    throw new Error(
+      `Invalid UI_CONFIG_PATH: ${raw}. The path must not traverse upward.`,
+    );
+  }
+  if (!/\.ya?ml$/i.test(raw)) {
+    throw new Error(
+      `Invalid UI_CONFIG_PATH: ${raw}. Expected a .yaml or .yml file.`,
+    );
+  }
+}
+
+let _settings: UISettings | undefined;
+
+// What the configuration file itself declared, as opposed to what
+// the defaults supplied or the environment overrode. Kept because
+// the merged result cannot say which level decided a flag, and a
+// value whose origin is unknown is one nobody can change with
+// confidence.
+let _fileFeatures: Record<string, boolean> = {};
+
+/** What a deployment gets before it configures anything. */
+export function getDefaultFeatures(): Record<string, boolean> {
+  return { ...(DEFAULTS.features as unknown as Record<string, boolean>) };
+}
+
+/** The feature flags the configuration file set, and only those. */
+export function getFileFeatures(): Record<string, boolean> {
+  return { ..._fileFeatures };
+}
+let _agentName: string | null = null;
+
+export function getSettings(): UISettings {
+  if (_settings) return _settings;
+
+  const explicitPath = process.env.UI_CONFIG_PATH;
+  const configPath =
+    explicitPath ||
+    resolve(__dirname, "../../../config/ui/settings.yaml");
+
+  if (explicitPath) {
+    assertUsableConfigPath(explicitPath);
+    if (!existsSync(configPath)) {
+      throw new Error(
+        `Config file not found: ${configPath}. Mount config/ui at /opt/app-root/src/config`,
+      );
+    }
+  }
+
+  const fromFile = loadYaml(configPath);
+
+  _fileFeatures = Object.fromEntries(
+    Object.entries((fromFile?.features as Record<string, unknown>) ?? {})
+      .filter(([, value]) => typeof value === "boolean"),
+  ) as Record<string, boolean>;
+
+  // Deep merge defaults with file config.
+  //
+  // Cloned, because `applyEnvOverrides` below writes into whatever
+  // this is. A shallow `{ ...DEFAULTS }` shares every nested object
+  // with DEFAULTS, so one override edited the module's own defaults
+  // for the life of the process and `resetSettings()` could not undo
+  // it — the next load started from the mutated copy. deepMerge only
+  // rebuilds the subtrees the file actually touches, so it has the
+  // same hole for every key the file omits.
+  const base = structuredClone(DEFAULTS) as unknown as Record<string, unknown>;
+  _settings = fromFile
+    ? deepMerge(base, fromFile) as unknown as UISettings
+    : base as unknown as UISettings;
+
+  // Apply environment variable overrides
+  applyEnvOverrides(_settings);
+
+  // Backfill keys added after older config files were written
+  if (!_settings.security.helmet.csp.frame_src?.length) {
+    _settings.security.helmet.csp.frame_src = [...DEFAULTS.security.helmet.csp.frame_src];
+  }
+
+  // Validate the final config
+  validateConfig(_settings);
+
+  // Warn if production environment has insecure session cookies
+  const isProd = process.env.ENVIRONMENT === 'production';
+  if (isProd && !_settings.security.session.secure_cookie) {
+    console.warn(
+      'WARNING: Running in production with secure_cookie=false. ' +
+      'Session cookies will be transmitted over HTTP. ' +
+      'Set SESSION_SECURE_COOKIE=true or update config file.'
+    );
+  }
+
+  return _settings;
+}
+
+// For testing only - clears the cached settings and agent name
+/**
+ * Where the agent lives, resolved once.
+ *
+ * The same `cfg.agent.endpoint || AGENT_HOST || "http://localhost:5002"`
+ * expression was copied into six files. A loopback default repeated
+ * six times is six places to miss when it is wrong, and a literal
+ * host in a router is a deployment detail in the wrong layer.
+ */
+const AGENT_HOST_FALLBACK = "http://localhost:5002";
+
+export function resolveAgentHost(): string {
+  const cfg = getSettings();
+  return cfg.agent.endpoint || process.env.AGENT_HOST || AGENT_HOST_FALLBACK;
+}
+
+export function resetSettings(): void {
+  _settings = undefined;
+  _agentName = null;
+  _fileFeatures = {};
+}
+
+export async function getAgentName(): Promise<string> {
+  if (_agentName !== null) return _agentName;
+
+  const agentHost = resolveAgentHost();
+
+  try {
+    const resp = await fetch(`${agentHost}/info`, { signal: AbortSignal.timeout(3000) });
+    if (resp.ok) {
+      const data = await resp.json() as { name?: string };
+      _agentName = data.name || "Agent";
+    } else {
+      _agentName = "Agent";
+    }
+  } catch {
+    _agentName = "Agent";
+  }
+  return _agentName;
+}

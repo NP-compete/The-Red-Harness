@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: temporal
+  labels:
+    component: durable-execution
+spec:
+  selector:
+    app: temporal
+  ports:
+    - name: grpc
+      port: 7233
+      targetPort: 7233

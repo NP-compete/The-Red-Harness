@@ -1,0 +1,205 @@
+"""State serialization and deserialization for the aegra deployment (MR-16).
+
+Dormant: nothing imports it. Checkpointing goes through LangGraph's
+own serializer, so this is the fallback for a store that cannot
+take the library's format. Kept with its MR reference so the
+decision behind it stays findable.
+"""
+
+import json
+from datetime import UTC, datetime
+from typing import Any
+
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+
+from agent.utils.pylogger import get_python_logger
+
+logger = get_python_logger()
+
+
+def serialize_message(msg: BaseMessage) -> dict[str, Any]:
+    """Serialize a single LangChain message to a JSON-safe dict."""
+    data: dict[str, Any] = {
+        "type": msg.type,
+        "content": msg.content,
+        "id": getattr(msg, "id", None),
+    }
+
+    if isinstance(msg, AIMessage) and msg.tool_calls:
+        data["tool_calls"] = [
+            {"id": tc.get("id"), "name": tc["name"], "args": tc["args"]}
+            for tc in msg.tool_calls
+        ]
+
+    if isinstance(msg, ToolMessage):
+        data["tool_call_id"] = msg.tool_call_id
+
+        shape = _describe_tool_result(msg.content)
+        if shape is not None:
+            data["shape"] = shape
+        data["name"] = getattr(msg, "name", None)
+        artifact = getattr(msg, "artifact", None)
+        if artifact is not None:
+            data["artifact"] = _safe_serialize(artifact)
+        from agent.aegra.mcp_apps import extract_mcp_app_from_message
+
+        mcp_app = extract_mcp_app_from_message(msg)
+        if mcp_app is not None:
+            data["mcpApp"] = _safe_serialize(mcp_app)
+
+    if msg.response_metadata:
+        data["response_metadata"] = _safe_serialize(msg.response_metadata)
+
+    if getattr(msg, "type", None) == "ai":
+        from agent.aegra.provenance import describe_message
+
+        provenance = describe_message(msg)
+        if provenance:
+            data["provenance"] = provenance
+
+    additional_kwargs = getattr(msg, "additional_kwargs", None)
+    if additional_kwargs:
+        data["additional_kwargs"] = _safe_serialize(additional_kwargs)
+
+    return data
+
+
+def deserialize_message(data: dict[str, Any]) -> BaseMessage:
+    """Reconstruct a LangChain message from a serialized dict."""
+    msg_type = data.get("type", "human")
+    content = data.get("content", "")
+    msg_id = data.get("id")
+    additional_kwargs = data.get("additional_kwargs")
+    kwargs_extra: dict[str, Any] = {}
+    if isinstance(additional_kwargs, dict):
+        kwargs_extra["additional_kwargs"] = dict(additional_kwargs)
+
+    if msg_type == "human":
+        return HumanMessage(content=content, id=msg_id, **kwargs_extra)
+    elif msg_type == "ai":
+        kwargs: dict[str, Any] = {"content": content, "id": msg_id, **kwargs_extra}
+        if "tool_calls" in data:
+            kwargs["tool_calls"] = data["tool_calls"]
+        return AIMessage(**kwargs)
+    elif msg_type == "system":
+        return SystemMessage(content=content, id=msg_id, **kwargs_extra)
+    elif msg_type == "tool":
+        tool_kwargs: dict[str, Any] = {
+            "content": content,
+            "tool_call_id": data.get("tool_call_id", ""),
+            "name": data.get("name"),
+            "id": msg_id,
+        }
+        if "artifact" in data:
+            tool_kwargs["artifact"] = data["artifact"]
+        merged_kwargs = dict(kwargs_extra.get("additional_kwargs") or {})
+        if (
+            "mcpApp" in data
+            and "mcpApp" not in merged_kwargs
+            and "mcp_app" not in merged_kwargs
+        ):
+            merged_kwargs["mcpApp"] = data["mcpApp"]
+        if merged_kwargs:
+            tool_kwargs["additional_kwargs"] = merged_kwargs
+        return ToolMessage(**tool_kwargs)
+    else:
+        return HumanMessage(content=content, id=msg_id, **kwargs_extra)
+
+
+def serialize_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Serialize full LangGraph state to a JSON-safe dict."""
+    result: dict[str, Any] = {}
+
+    for key, value in state.items():
+        if key == "messages" and isinstance(value, list):
+            result[key] = [
+                serialize_message(m)
+                if isinstance(m, BaseMessage)
+                else _safe_serialize(m)
+                for m in value
+            ]
+        else:
+            result[key] = _safe_serialize(value)
+
+    result["_serialized_at"] = datetime.now(UTC).isoformat()
+    return result
+
+
+def deserialize_state(data: dict[str, Any]) -> dict[str, Any]:
+    """Reconstruct LangGraph state from a serialized dict."""
+    result: dict[str, Any] = {}
+
+    for key, value in data.items():
+        if key == "_serialized_at":
+            continue
+        elif key == "messages" and isinstance(value, list):
+            result[key] = [
+                deserialize_message(m) if isinstance(m, dict) and "type" in m else m
+                for m in value
+            ]
+        else:
+            result[key] = value
+
+    return result
+
+
+def state_to_json(state: dict[str, Any], indent: int | None = None) -> str:
+    """Serialize state to a JSON string."""
+    return json.dumps(serialize_state(state), indent=indent, default=str)
+
+
+def state_from_json(json_str: str) -> dict[str, Any]:
+    """Deserialize state from a JSON string."""
+    return deserialize_state(json.loads(json_str))
+
+
+def _safe_serialize(obj: Any) -> Any:
+    """Recursively convert an object to a JSON-safe representation."""
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): _safe_serialize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_safe_serialize(item) for item in obj]
+    if isinstance(obj, BaseMessage):
+        return serialize_message(obj)
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
+    return str(obj)
+
+
+def _describe_tool_result(content: Any) -> dict[str, Any] | None:
+    """Describe a tool result's shape, or `None` when it cannot be read."""
+    from agent.src.agent.result_shape import describe_result
+
+    try:
+        value: Any = content
+        if isinstance(content, str):
+            stripped = content.strip()
+            if stripped[:1] in "[{":
+                import json as _json
+
+                try:
+                    value = _json.loads(stripped)
+                except ValueError:
+                    value = content
+
+        described = describe_result(value)
+        return {
+            "kind": described.shape.value,
+            "rows": described.rows,
+            "columns": list(described.columns),
+            "language": described.language,
+            "needs_paging": described.needs_paging,
+            "needs_collapsing": described.needs_collapsing,
+        }
+    except Exception:
+        return None

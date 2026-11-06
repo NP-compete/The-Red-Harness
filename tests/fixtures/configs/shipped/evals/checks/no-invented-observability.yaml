@@ -1,0 +1,10 @@
+name: no-invented-observability
+group: accuracy
+decides: >
+  Blocks the incident-triage skill from shipping. An agent that
+  invents metrics is worse than one that declines, because the
+  reader cannot tell the difference.
+needs: [datadog]
+judge: gemini-3.8-flash
+dataset: skills/incident-triage/evals/evals.json
+cases: [2]

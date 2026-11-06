@@ -1,0 +1,19 @@
+# The settings the end-to-end server runs with.
+#
+# One thing only: the rate limiter off. It defaults to 600 requests
+# a minute keyed on the signed-in user, falling back to IP — and in
+# a Playwright run there is no signed-in user and every test shares
+# one IP, so seventy tests against one server are one bucket. On a
+# runner fast enough to spend it, the next page renders
+# `{"statusCode":429,"error":"Too Many Requests"}` and the test
+# waits sixty seconds for a textarea that is never coming. That is
+# what failed `branding.spec.ts` and took `settings-page.spec.ts`
+# with it, three attempts each.
+#
+# Turning it off here does not weaken the check: `rate_limit` has
+# its own tests, and they assert on the limiter rather than on a
+# page that happens to load. What this file removes is a shared
+# budget that the suite was spending on itself.
+security:
+  rate_limit:
+    enabled: false

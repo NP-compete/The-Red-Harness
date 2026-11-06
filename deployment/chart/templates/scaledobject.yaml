@@ -1,0 +1,39 @@
+{{- if .Values.components.scaleToZero }}
+{{/*
+Scale to nothing when idle.
+
+The Deployment above stops naming a replica count when this is on:
+a replica count there and a scaler here fight, and every reconcile
+sets the number back. The hand-written autoscaler is left out for the
+same reason — two controllers on one Deployment oscillate.
+
+A queue-depth trigger alone deadlocks: at zero replicas nothing
+receives the request, so nothing enqueues a run, so the queue stays
+empty and the workload never wakes. The external trigger is what
+holds the connection open and asks for a pod first.
+*/}}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ .Values.app.name }}
+  labels:
+    {{- include "agent.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ .Values.app.name }}
+  minReplicaCount: 0
+  maxReplicaCount: {{ .Values.autoscaling.maxReplicas }}
+  pollingInterval: {{ .Values.scaleToZero.pollingIntervalSeconds }}
+  # Must exceed the longest expected run: an in-flight run dies on
+  # scale-in, and although the lease reaper re-executes it, the
+  # reader's stream is already severed.
+  cooldownPeriod: {{ .Values.scaleToZero.cooldownSeconds }}
+  triggers:
+    - type: external
+      metadata:
+        scalerAddress: {{ .Values.scaleToZero.scalerAddress }}
+        host: {{ .Values.scaleToZero.host | quote }}
+        targetPendingRequests: {{ .Values.scaleToZero.targetPendingRequests | quote }}
+{{- end }}

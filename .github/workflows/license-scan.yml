@@ -1,0 +1,55 @@
+name: License Compliance
+
+on:
+  push:
+    branches: [main, deep-agent]
+    paths:
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'requirements*.txt'
+      - 'Containerfile'
+      # The interface's dependencies live here since the
+      # merge; its own license scan watched these and this
+      # one did not know the files existed.
+      - 'services/ui/package.json'
+      - 'services/ui/package-lock.json'
+  pull_request:
+    branches: [main, deep-agent]
+    paths:
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'requirements*.txt'
+      - 'Containerfile'
+      # The interface's dependencies live here since the
+      # merge; its own license scan watched these and this
+      # one did not know the files existed.
+      - 'services/ui/package.json'
+      - 'services/ui/package-lock.json'
+
+permissions:
+  contents: read
+
+jobs:
+  license-scan:
+    name: License Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Hardened as the interface's copy already was.
+          # Not done in tag.yml, which pushes a tag and
+          # needs the credential it would drop.
+          persist-credentials: false
+
+      - name: Install Dagger
+        run: make dagger-install
+
+      # A job of its own rather than one more function in `make ci`,
+      # and the reason is in `required-checks.yml`: this is advisory,
+      # "a conversation rather than a build failure". Everything
+      # inside `ci` blocks a merge, so an advisory check cannot live
+      # there. Same container, same trivy, different consequence.
+      - name: Scan for license violations
+        run: make license-scan

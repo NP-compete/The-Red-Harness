@@ -1,0 +1,726 @@
+import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import { v4 as uuidv4 } from 'uuid';
+import {
+  Page,
+  Masthead,
+  MastheadMain,
+  MastheadBrand,
+  MastheadToggle,
+  MastheadContent,
+  PageSidebar,
+  PageSidebarBody,
+  PageToggleButton,
+  Toolbar,
+  ToolbarContent,
+  ToolbarItem,
+  ToolbarGroup,
+} from '@patternfly/react-core';
+import { BarsIcon } from '@patternfly/react-icons';
+import { RedHatLogo } from '../RedHatLogo';
+import { Sidebar } from '../Sidebar';
+import { KeyboardShortcutsDialog } from '../KeyboardShortcutsDialog';
+import { ErrorBoundary } from '../ErrorBoundary';
+import { SessionExpiredModal } from '../SessionExpiredModal';
+import { DebugToggle } from '../DebugToggle';
+import { OfflineBanner } from '../OfflineBanner';
+import { UpdateBanner } from '../UpdateBanner';
+import { applyBadge, badgeFor } from '../../lib/badge';
+import { notifiable } from '../../lib/platform';
+import { registerShellWorker } from '../../lib/register-sw';
+import { getPwaConfig, type PwaConfig } from '../../services/config.service';
+import { SessionWarning } from '../SessionWarning';
+import { draftStorage } from '../../services/draftStorage';
+import { useAppSelector, useAppDispatch } from '../../redux/hooks';
+import {
+  selectAllChats,
+  addChat,
+  deleteChat,
+  updateChat,
+  setChats,
+  markThreadsDeleted,
+  setLoadingThreads,
+  setThreadsListHydrated,
+  ChatItem,
+} from '../../redux/slices/chats';
+import { addToast } from '../../redux/slices/toasts';
+import { updateProjectThreadCount } from '../../redux/slices/projects';
+import { SidebarChatItem } from '../../types/chat';
+import { chatStorage } from '../../services/chatStorage';
+import {
+  getAllThreadsByUserId,
+  getThreadState,
+  deleteThread,
+  deleteThreads,
+  listAllThreadIds,
+  setThreadPinned,
+  type Thread,
+} from '../../services/agent-rest';
+import { getProjects, getThreadsByProject } from '../../services/projects-api';
+import { setAuthExpiredCallback } from '../../services/authenticated-fetch';
+import { markChatAsClientCreated, isClientCreatedChat } from '../../services/newChatTracker';
+import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
+import { releaseStreamingManager } from '../../lib/streaming/streamingManagerRegistry';
+import { useProjects } from '../../hooks/useProjects';
+import type { RootState } from '../../redux/store';
+import { refreshFromServer } from '../../lib/refresh-from-server';
+import { isUnnamed, previewFor, suggestTitle } from '../../lib/thread-title';
+
+function toSafeDate(value: unknown): Date {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) return value;
+  if (typeof value === 'string' && value) {
+    const d = new Date(value);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  if (typeof value === 'number') {
+    const d = new Date(value);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  return new Date();
+}
+
+function toSafeISOString(value: unknown): string {
+  return toSafeDate(value).toISOString();
+}
+
+async function withProjectThreads(history: Thread[]): Promise<Thread[]> {
+  try {
+    const projects = await getProjects();
+    const extras = (
+      await Promise.allSettled(
+        projects.map((p) => getThreadsByProject(p.project_id)),
+      )
+    ).flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
+    const byId = new Map(history.map((t) => [t.id, t]));
+    for (const t of extras) {
+      const prev = byId.get(t.id);
+      if (!prev) {
+        byId.set(t.id, t);
+        continue;
+      }
+      byId.set(t.id, {
+        ...prev,
+        title: prev.title || t.title,
+        updatedAt: t.updatedAt ?? prev.updatedAt,
+        project_id: t.project_id ?? prev.project_id,
+      });
+    }
+    return [...byId.values()];
+  } catch {
+    return history;
+  }
+}
+
+interface AppLayoutProps {
+  children: React.ReactNode;
+}
+
+export function AppLayout({ children }: AppLayoutProps) {
+  const [pwa, setPwa] = useState<PwaConfig | null>(null);
+  const [updateWaiting, setUpdateWaiting] = useState(false);
+  const registration = useRef<ServiceWorkerRegistration | null>(null);
+
+  // A run in flight anywhere: offering a version bump mid-answer
+  // is the wrong moment however the reader got there.
+  const streamingStates = useAppSelector((state) => state.chats.streamingStates);
+  const anyRunInFlight = Object.values(streamingStates).some(
+    (one) => (one as { isStreaming?: boolean })?.isStreaming,
+  );
+
+  // The dock count: conversations stopped waiting for a person,
+  // which is not the same as conversations doing something.
+  useEffect(() => {
+    const waiting = Object.entries(streamingStates).map(([id, one]) => ({
+      id,
+      awaitingUser: Boolean((one as { pendingInterrupt?: unknown })?.pendingInterrupt),
+    }));
+    const badge = badgeFor(waiting, {
+      enabled: pwa?.notifications.badge === true,
+      supported: notifiable(
+        {
+          platform: (navigator as { userAgentData?: { platform?: string } }).userAgentData
+            ?.platform,
+          userAgent: navigator.userAgent,
+        },
+        pwa?.notifications.platforms ?? [],
+      ),
+    });
+    applyBadge(navigator, badge);
+  }, [streamingStates, pwa]);
+
+  useEffect(() => {
+    void getPwaConfig().then(async (found) => {
+      setPwa(found);
+      const reg = await registerShellWorker({ enabled: found?.enabled === true });
+      registration.current = reg;
+      if (!reg) return;
+      // Two ways a new version shows up: already waiting when the
+      // page loads, and arriving while it is open. Without the
+      // first, somebody who opened a tab after a deploy is never
+      // told there is anything newer.
+      if (reg.waiting) setUpdateWaiting(true);
+      reg.addEventListener('updatefound', () => {
+        const arriving = reg.installing;
+        arriving?.addEventListener('statechange', () => {
+          if (arriving.state === 'installed' && navigator.serviceWorker.controller) {
+            setUpdateWaiting(true);
+          }
+        });
+      });
+    });
+  }, []);
+
+  const { t } = useTranslation();
+  // Read inside effects that must not rerun when the language
+  // changes, so the text is current without `t` in the deps.
+  const tRef = useRef(t);
+  tRef.current = t;
+  const dispatch = useAppDispatch();
+  const chats = useAppSelector(selectAllChats);
+  const branding = useAppSelector((state: RootState) => state.config.branding);
+  const {
+    sidebarProjects,
+    createProject,
+    updateProject,
+    deleteProject,
+    assignThreadToProject,
+    unassignAllThreads,
+  } = useProjects();
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sessionExpired, setSessionExpired] = useState(false);
+  const [isHelpOpen, setIsHelpOpen] = useState(false);
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  const chatsRef = useRef(chats);
+  useEffect(() => { chatsRef.current = chats; }, [chats]);
+
+  useEffect(() => {
+    setAuthExpiredCallback(() => {
+      setSessionExpired(true);
+    });
+    return () => {
+      setAuthExpiredCallback(null);
+    };
+  }, []);
+
+  const currentChatId = useMemo(() => {
+    const match = /^\/chat\/([^/]+)/.exec(location.pathname);
+    return match?.[1];
+  }, [location.pathname]);
+
+  // Finish a delete that outlived its page.
+  //
+  // "Delete all conversations" is hundreds of requests against the
+  // agent; a refresh partway through abandoned the rest, and the
+  // survivors came back looking like the delete had failed. The
+  // tombstones are on disk, so on load they are re-applied to the
+  // sidebar and any thread still on the server is swept again.
+  useEffect(() => {
+    const pending = chatStorage.loadDeletedThreadIds();
+    if (pending.length === 0) return;
+
+    dispatch(markThreadsDeleted({ ids: pending }));
+    let cancelled = false;
+
+    void (async () => {
+      const all = await listAllThreadIds();
+      if (cancelled) return;
+      // `null` means the listing failed. Treating that as "nothing
+      // left" dropped the persisted deletion intent after a single
+      // 5xx or an offline load, and the threads came back.
+      if (all === null) return;
+      const remaining = new Set(all);
+      const unfinished = pending.filter((id) => remaining.has(id));
+      if (unfinished.length === 0) {
+        chatStorage.clearDeletedThreadIds();
+        return;
+      }
+      const { failed } = await deleteThreads(unfinished);
+      if (!cancelled && failed === 0) {
+        chatStorage.clearDeletedThreadIds();
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [dispatch]);
+
+  useEffect(() => {
+    const loadedChats = chatStorage.loadChats();
+    if (loadedChats.length > 0) {
+      const mapped: ChatItem[] = loadedChats.map((c) => ({
+        ...c,
+        timestamp: toSafeISOString(c.timestamp),
+        historicalActivities: c.historicalActivities ?? {},
+        feedback: c.feedback ?? {},
+      }));
+      dispatch(setChats(mapped));
+    }
+    dispatch(setLoadingThreads(false));
+  }, [dispatch]);
+
+  useEffect(() => {
+    async function loadUserHistory() {
+      try {
+        dispatch(setLoadingThreads(true));
+        const history = await withProjectThreads(
+          await getAllThreadsByUserId(window.USER_DATA.preferred_username || window.USER_DATA.sub),
+        );
+
+        const backendIds = new Set(history.map((t) => t.id));
+        const local = chatsRef.current;
+
+        const surviving = local.filter(
+          (c) => backendIds.has(c.id) || isClientCreatedChat(c.id),
+        );
+
+        const backendTitleMap = new Map(
+          history.filter((t) => t.title).map((t) => [t.id, t.title]),
+        );
+        const backendTimestampMap = new Map(
+          history.reduce<[string, string][]>((acc, t) => {
+            if (t.updatedAt) acc.push([t.id, t.updatedAt]);
+            return acc;
+          }, []),
+        );
+
+        const backendProjectMap = new Map(
+          history.map((t) => [t.id, t.project_id ?? null] as const),
+        );
+
+        // What the agent says about a conversation can change between
+        // listings — a run dies, a fork is made — so it is taken
+        // afresh rather than kept from whatever this browser last
+        // stored.
+        const backendFacts = new Map(history.map((t) => [t.id, t] as const));
+
+        const survivingWithTitles = surviving.map((c) => {
+          const backendTitle = backendTitleMap.get(c.id);
+          const ts = backendTimestampMap.get(c.id);
+          const updated = refreshFromServer({ ...c }, backendFacts.get(c.id));
+          // Not translated, here or at creation: the title is
+          // persisted and compared, so a localised one would both
+          // break this check and leave a user's history in whatever
+          // language they happened to be using that day.
+          if (backendTitle && isUnnamed(c.title)) {
+            updated.title = backendTitle;
+            updated.preview = backendTitle;
+          }
+          if (ts) {
+            updated.timestamp = ts;
+          }
+          if (
+            backendIds.has(c.id) &&
+            backendProjectMap.has(c.id) &&
+            c._prevProjectId === undefined
+          ) {
+            updated.project_id = backendProjectMap.get(c.id);
+          }
+          return updated;
+        });
+
+        const survivingIds = new Set(survivingWithTitles.map((c) => c.id));
+        const added: ChatItem[] = history
+          .filter((t) => !survivingIds.has(t.id))
+          .map((t) => ({
+            id: t.id,
+            messages: [],
+            title: t.title || 'Chat',
+            preview: t.title || 'Chat',
+            serverStatus: t.serverStatus ?? null,
+            timestamp: t.updatedAt || new Date().toISOString(),
+            historicalActivities: {},
+            feedback: {},
+            project_id: t.project_id ?? null,
+            pinned: t.pinned === true,
+            forkedFrom: t.forkedFrom ?? null,
+            forkedAt: t.forkedAt ?? null,
+          }));
+
+        const reconciled = [...survivingWithTitles, ...added].sort(
+          (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+        );
+        dispatch(setChats(reconciled));
+
+        if (reconciled.length === 0) {
+          chatStorage.clearChats();
+        }
+
+        // Pre-fetch most recent thread's messages (warm the cache)
+        const topThread = reconciled.find((c) => c.messages.length === 0);
+        if (topThread) {
+          getThreadState(topThread.id).then((msgs) => {
+            if (msgs.length > 0) {
+              dispatch(updateChat({
+                id: topThread.id,
+                updates: {
+                  messages: msgs,
+                  // Cut on a word boundary, and never from a
+                  // question carrying an address or a key: this
+                  // string is the chat list, the rename box and
+                  // what a screen reader reads out.
+                  title: suggestTitle(msgs) || topThread.title || 'Chat',
+                },
+              }));
+            }
+          }).catch(() => { /* pre-fetch is best-effort */ });
+        }
+
+        dispatch(setThreadsListHydrated(true));
+      } catch (error) {
+        console.error('Failed to load user history:', error);
+        dispatch(addToast({ title: tRef.current('toast.loadHistoryFailed'), variant: 'warning' }));
+      } finally {
+        dispatch(setLoadingThreads(false));
+      }
+    }
+
+    loadUserHistory();
+    // `t` deliberately absent. It changes identity on every language
+    // switch, and refetching history there reconciles and overwrites
+    // chat state for a reason that has nothing to do with the data.
+    // The toast text is read through a ref instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dispatch]);
+
+  useEffect(() => {
+    if (chats.length > 0) {
+      chatStorage.saveChats(chats as any);
+    }
+  }, [chats]);
+
+  const userData = useMemo(() => window.USER_DATA, []);
+  const userName =
+    userData?.displayName ||
+    userData?.name ||
+    userData?.given_name ||
+    userData?.preferred_username ||
+    'User';
+  const tokenExpiry = useMemo(() => {
+    if (userData?.expiresAt) {
+      return new Date(userData.expiresAt);
+    }
+    const fallback = new Date();
+    fallback.setHours(fallback.getHours() + 2);
+    return fallback;
+  }, [userData?.expiresAt]);
+
+  const sidebarChats: SidebarChatItem[] = useMemo(
+    () =>
+      chats.map((chat) => ({
+        id: chat.id,
+        title: chat.title,
+        timestamp: toSafeDate(chat.timestamp),
+        preview:
+          chat.messages.length > 0
+            ? previewFor(String(chat.messages[0].content))
+            : chat.preview,
+        project_id: chat.project_id,
+        pinned: chat.pinned === true,
+      })),
+    [chats]
+  );
+
+  const handleSelectChat = (chatId: string) => navigate(`/chat/${chatId}`);
+
+  const handleNewChat = useCallback((projectId?: string) => {
+    // Only the per-project "+" control passes projectId. The sidebar
+    // "New Chat" button always starts an unassigned conversation.
+    const newChatId = uuidv4();
+    markChatAsClientCreated(newChatId);
+    const newChat: ChatItem = {
+      id: newChatId,
+      title: 'New Chat',
+      timestamp: new Date().toISOString(),
+      preview: 'Start a new conversation',
+      messages: [],
+      historicalActivities: {},
+      feedback: {},
+      project_id: projectId ?? null,
+    };
+    dispatch(addChat(newChat));
+    if (projectId) {
+      dispatch(updateProjectThreadCount({ projectId, delta: 1 }));
+    }
+    navigate(`/chat/${newChatId}`, { state: { newChat: true } });
+  }, [dispatch, navigate]);
+
+  const handleDeleteChat = useCallback(
+    async (chatId: string) => {
+      const chat = chats.find((c) => c.id === chatId);
+      if (chat?.project_id) {
+        dispatch(updateProjectThreadCount({ projectId: chat.project_id, delta: -1 }));
+      }
+      releaseStreamingManager(chatId);
+      dispatch(deleteChat(chatId));
+      chatStorage.clearChats();
+      const remaining = chats.filter((c) => c.id !== chatId);
+      const ok = await deleteThread(chatId).catch(() => false);
+      if (ok) {
+        dispatch(addToast({ title: t('toast.chatDeleted'), variant: 'success' }));
+      } else {
+        if (chat?.project_id) {
+          dispatch(updateProjectThreadCount({ projectId: chat.project_id, delta: 1 }));
+        }
+        dispatch(addToast({ title: t('toast.chatDeletedLocally'), variant: 'warning' }));
+      }
+      if (location.pathname === `/chat/${chatId}`) {
+        navigate(remaining.length > 0 ? `/chat/${remaining[0].id}` : '/');
+      }
+    },
+    [dispatch, chats, navigate, location.pathname, t]
+  );
+
+  // Several at once, through the same path the resumable sweep uses:
+  // the tombstones go down first, so a refresh partway through does
+  // not bring the conversations back.
+  const handleDeleteMany = useCallback(
+    async (ids: string[]) => {
+      if (ids.length === 0) return;
+      dispatch(markThreadsDeleted({ ids }));
+      chatStorage.saveDeletedThreadIds(ids);
+      for (const id of ids) {
+        releaseStreamingManager(id);
+        dispatch(deleteChat(id));
+      }
+      const { failed } = await deleteThreads(ids);
+      if (failed === 0) {
+        chatStorage.clearDeletedThreadIds();
+        dispatch(addToast({ title: t('toast.chatDeleted'), variant: 'success' }));
+      } else {
+        dispatch(addToast({ title: t('toast.chatDeletedLocally'), variant: 'warning' }));
+      }
+      if (currentChatId && ids.includes(currentChatId)) {
+        navigate('/');
+      }
+    },
+    [dispatch, navigate, currentChatId, t],
+  );
+
+  const handleRenameChat = useCallback(
+    (chatId: string, newTitle: string) => {
+      dispatch(updateChat({ id: chatId, updates: { title: newTitle.trim() || 'Untitled Chat' } }));
+    },
+    [dispatch]
+  );
+
+  const handleTogglePin = useCallback(
+    async (chatId: string, pinned: boolean) => {
+      // Optimistic, then corrected. A pin that waits for a round trip
+      // reads as a dead button, and the only failure here is the row
+      // going back to where it was.
+      dispatch(updateChat({ id: chatId, updates: { pinned } }));
+      const ok = await setThreadPinned(chatId, pinned);
+      if (!ok) dispatch(updateChat({ id: chatId, updates: { pinned: !pinned } }));
+    },
+    [dispatch]
+  );
+
+  const handleDeleteProject = useCallback(
+    async (projectId: string, options?: { keepThreads?: boolean }) => {
+      const keepThreads = options?.keepThreads === true;
+      const { ok, deletedThreadIds, missing } = await deleteProject(projectId, { keepThreads });
+      if (!ok) {
+        dispatch(addToast({ title: t('toast.deleteProjectFailed'), variant: 'danger' }));
+        return false;
+      }
+
+      if (keepThreads) {
+        dispatch(addToast({
+          title: t('toast.projectDeletedWithChats'),
+          variant: 'success',
+        }));
+        if (location.pathname.startsWith(`/project/${projectId}`)) {
+          navigate('/');
+        }
+        return true;
+      }
+
+      dispatch(addToast({ title: t('toast.projectDeleted'), variant: 'success' }));
+      if (missing) {
+        for (const chat of chats) {
+          if (chat.project_id === projectId) {
+            dispatch(updateChat({ id: chat.id, updates: { project_id: null } }));
+          }
+        }
+        if (location.pathname.startsWith(`/project/${projectId}`)) {
+          navigate('/');
+        }
+        return true;
+      }
+      const localChatIds = chats
+        .filter((c) => c.project_id === projectId)
+        .map((c) => c.id);
+      const allIds = new Set([...deletedThreadIds, ...localChatIds]);
+      if (
+        location.pathname.startsWith(`/project/${projectId}`) ||
+        (currentChatId && allIds.has(currentChatId))
+      ) {
+        navigate('/');
+      }
+      for (const id of allIds) {
+        releaseStreamingManager(id);
+        dispatch(deleteChat(id));
+      }
+      const remaining = chats.filter((c) => !allIds.has(c.id));
+      if (remaining.length === 0) {
+        chatStorage.clearChats();
+      } else {
+        chatStorage.saveChats(remaining as any);
+      }
+      return true;
+    },
+    [deleteProject, dispatch, chats, navigate, location.pathname, currentChatId, t],
+  );
+
+  const handleUnassignAll = useCallback(
+    async (projectId: string) => {
+      const ok = await unassignAllThreads(projectId);
+      if (ok) {
+        dispatch(addToast({ title: t('toast.conversationsMoved'), variant: 'success' }));
+      } else {
+        dispatch(addToast({ title: t('toast.unassignFailed'), variant: 'danger' }));
+      }
+      return ok;
+    },
+    [unassignAllThreads, dispatch, t],
+  );
+
+  useKeyboardShortcuts({
+    onNewChat: () => navigate('/'),
+    onOpenSettings: () => navigate('/settings'),
+    onToggleHelp: () => setIsHelpOpen((v) => !v),
+  });
+
+  const masthead = (
+    <Masthead display={{ default: 'inline' }} className="!bg-card !border-b !border-border">
+      <MastheadToggle>
+        <PageToggleButton
+          variant="plain"
+          aria-label={t('layout.toggleSidebar')}
+          isSidebarOpen={!sidebarCollapsed}
+          onSidebarToggle={() => setSidebarCollapsed((prev) => !prev)}
+          id="nav-toggle"
+        >
+          <BarsIcon />
+        </PageToggleButton>
+      </MastheadToggle>
+      <MastheadMain>
+        <MastheadBrand>
+          <Link to="/" className="flex items-center gap-2 no-underline text-inherit" style={{ textDecoration: 'none', color: 'inherit' }}>
+            <div className="flex items-center gap-2">
+              {branding?.logo_url ? (
+                <img
+                  src={branding.logo_url}
+                  // Decorative: the same words are in the <span> beside it,
+                  // inside the same link, so alt text here is read twice
+                  // (IBM Equal Access `img_alt_redundant`).
+                  alt=""
+                  width={20}
+                  height={20}
+                  decoding="async"
+                  className="h-5 w-auto"
+                  style={{ height: '1.25rem', width: 'auto', maxHeight: '1.25rem' }}
+                />
+              ) : (
+                <RedHatLogo className="h-5 w-auto" style={{ color: '#ee0000' }} />
+              )}
+              <span className="text-base font-semibold text-foreground">
+                {branding?.title || window.APP_DATA?.agentName || 'Agent'}
+              </span>
+            </div>
+          </Link>
+        </MastheadBrand>
+      </MastheadMain>
+      <MastheadContent>
+        <Toolbar id="masthead-toolbar" isFullHeight>
+          <ToolbarContent>
+            <ToolbarGroup align={{ default: 'alignEnd' }}>
+              <ToolbarItem>
+                <DebugToggle />
+              </ToolbarItem>
+            </ToolbarGroup>
+          </ToolbarContent>
+        </Toolbar>
+      </MastheadContent>
+    </Masthead>
+  );
+
+  const sidebar = (
+    <PageSidebar isSidebarOpen={!sidebarCollapsed} aria-label={t('layout.sidebarNavigation')} role="navigation">
+      <PageSidebarBody isFilled className="min-h-0">
+        <ErrorBoundary
+          onError={(error, errorInfo) => {
+            console.error('Sidebar error:', error, errorInfo);
+          }}
+        >
+          <Sidebar
+            userName={userName}
+            currentChatId={currentChatId}
+            chatHistory={sidebarChats}
+            tokenExpiry={tokenExpiry}
+            onNewChat={handleNewChat}
+            onSelectChat={handleSelectChat}
+            onDeleteChat={handleDeleteChat}
+            onDeleteMany={handleDeleteMany}
+            onRenameChat={handleRenameChat}
+            onTogglePin={handleTogglePin}
+            projects={sidebarProjects}
+            onCreateProject={createProject}
+            onUpdateProject={updateProject}
+            onDeleteProject={handleDeleteProject}
+            onAssignThread={assignThreadToProject}
+            onUnassignAll={handleUnassignAll}
+          />
+        </ErrorBoundary>
+      </PageSidebarBody>
+    </PageSidebar>
+  );
+
+  return (
+    <>
+      {/* Outside the page frame, which renders its masthead and
+          sidebar before its children: inside, the offer to skip the
+          sidebar came 161st of 168 stops, by which point there was
+          nothing left to skip. A skip link is first or it is
+          decoration. */}
+      <a href="#main-content" className="skip-to-main sr-only">
+        {t('layout.skipToContent')}
+      </a>
+      <UpdateBanner
+        waiting={updateWaiting}
+        busy={anyRunInFlight}
+        onApply={() => {
+          registration.current?.waiting?.postMessage({ type: 'apply-update' });
+          window.location.reload();
+        }}
+      />
+    <Page masthead={masthead} sidebar={sidebar} className="h-screen bg-background text-foreground">
+      <KeyboardShortcutsDialog isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
+      {/* PatternFly Modal traps focus and restores focus on close. */}
+      <SessionExpiredModal isOpen={sessionExpired} />
+      <ErrorBoundary
+        onError={(error, errorInfo) => {
+          console.error('Main content error:', error, errorInfo);
+        }}
+      >
+        {/* A div, not a <main>: PatternFly's <Page> already renders one, and
+            two unlabelled `main` landmarks is a WCAG failure (IBM Equal
+            Access `aria_main_label_unique`). `tabindex=-1` keeps it a valid
+            target for the skip link above. */}
+        <div id="main-content" tabIndex={-1} className="flex-1 flex flex-col min-h-0 overflow-hidden">
+          <OfflineBanner />
+          <SessionWarning
+            expiresAt={tokenExpiry}
+            hasDraft={currentChatId ? draftStorage.load(currentChatId) !== null : false}
+          />
+          {children}
+        </div>
+      </ErrorBoundary>
+    </Page>
+    </>
+  );
+}

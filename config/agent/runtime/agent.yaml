@@ -1,0 +1,779 @@
+# Agent Configuration
+#
+# Unified runtime config for the template agent. Sections marked [YAML-loaded]
+# are parsed by the Python config loader at startup. Sections marked [env-var]
+# are read from environment variables via Pydantic BaseSettings — they appear
+# here as the canonical reference for what those settings do and their defaults.
+#
+# Template users configure everything here. No Python code needed.
+#
+# OpenShift notes:
+#   - Secrets (DB passwords, API keys) come via OpenShift Secrets → env vars.
+#   - Infrastructure endpoints (DB host, Redis host) come via ConfigMaps → env vars.
+#   - Everything else lives here.
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Shape of this file                                              [YAML-loaded]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Which layout of this file the build should expect. A build reads the
+# current version and the one before it; outside that window it refuses
+# to start rather than quietly ignore fields it does not know.
+# See docs/development/compatibility.md.
+schema_version: 3
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Identity                                                        [YAML-loaded]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+name: "Workpilot"
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Model                                                              [env-var]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+model:
+  max_output_tokens: 8192
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Providers                                                      [YAML-loaded]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Model resolution strategy:
+#   legacy: Use built-in create_model() — Vertex AI (Gemini + Claude) + vLLM.
+#   deepagents: Use deepagents resolve_model() + ProviderProfile registry.
+resolve_strategy: legacy
+# Provider profiles — register with deepagents.register_provider_profile()
+# Only used when resolve_strategy: deepagents
+providers:
+  google_genai:
+    init_kwargs:
+      # project: ${GCP_PROJECT}
+      temperature: 0.0
+  anthropic_vertex:
+    init_kwargs:
+      # project: ${GCP_PROJECT}
+      temperature: 0.0
+  openai:
+    init_kwargs:
+      temperature: 0.0
+# ── vLLM / OpenAI-compatible models ──────────────────────────────
+# Any model not in the built-in Gemini/Claude lists is routed to the
+# vLLM endpoint. Set VLLM_BASE_URL to your inference server.
+#
+# Examples:
+#   VLLM_BASE_URL=http://vllm-server:8000/v1
+#   VLLM_BASE_URL=http://ollama:11434/v1
+#   VLLM_BASE_URL=https://my-tgi-endpoint.example.com/v1
+#
+# Then use any model name in PROMPT.md:
+#   model: mistralai/Mistral-7B-Instruct-v0.3
+#   model: meta-llama/Llama-3.1-8B-Instruct
+#   model: ibm-granite/granite-3.3-8b-instruct
+#
+# VLLM_API_KEY defaults to "EMPTY" (vLLM default). Set if your
+# endpoint requires authentication.
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Harness Profiles                                               [YAML-loaded]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Per-model runtime adjustments. Single source of truth — used by both
+# the provider registry (deepagents HarnessProfile) and middleware resolution.
+#
+# Key format: "provider:model" or just "model" for provider-agnostic matching.
+harness_profiles:
+  gemini-3.5-flash-lite:
+    system_prompt_suffix: ""
+    excluded_tools: []
+    excluded_middleware: []
+    general_purpose_subagent:
+      enabled: true
+  gemini-3.8-flash:
+    system_prompt_suffix: ""
+    # Dataverse answers through one tool here: `execute_sql`.
+    #
+    # The server also ships a four-step planning pipeline
+    # (identify_dataproducts -> shortlist_tables -> get_sql ->
+    # execute_sql). Each planning step is a remote LLM call costing
+    # ~20s, and the knowledge inside them is prompt knowledge, not
+    # machinery — so it lives in the `dataverse` skill instead,
+    # where it is readable, reviewable and free. What cannot be a
+    # skill is running the query, and that is the one kept.
+    # Model limitations only. Tools removed by product decision live
+    # under `middleware.tool_exclusion`, because listing them here
+    # puts them on the Models page as "not available with this
+    # model", which is not why they are gone.
+    excluded_tools: []
+    excluded_middleware: []
+    general_purpose_subagent:
+      enabled: true
+  gemini-2.5-pro:
+    system_prompt_suffix: ""
+    excluded_tools: []
+    excluded_middleware: []
+    general_purpose_subagent:
+      enabled: true
+  gemini-2.5-flash:
+    system_prompt_suffix: ""
+    excluded_tools: []
+    excluded_middleware: []
+    general_purpose_subagent:
+      enabled: true
+  gemini-3.1-pro-preview:
+    system_prompt_suffix: ""
+    excluded_tools: []
+    excluded_middleware: []
+    general_purpose_subagent:
+      enabled: true
+  gemini-3-flash-preview:
+    system_prompt_suffix: ""
+    excluded_tools: []
+    excluded_middleware: []
+    general_purpose_subagent:
+      enabled: true
+  claude-sonnet-4:
+    system_prompt_suffix: ""
+    excluded_tools: []
+    excluded_middleware:
+      - patch_tool_calls
+    general_purpose_subagent:
+      enabled: true
+  claude-sonnet-4-6@default:
+    system_prompt_suffix: ""
+    excluded_tools: []
+    excluded_middleware:
+      - patch_tool_calls
+    general_purpose_subagent:
+      enabled: true
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Middleware Pipeline                                            [YAML-loaded]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Controls which deepagents middleware is active and how it behaves.
+# Resolution order: defaults → profile (matched from model: field) → per-agent overrides
+middleware:
+  human_approval:
+    enabled: true    # set to false to disable human-in-the-loop tool approval
+    mode: all        # 'all' = every tool; 'none' = disabled
+    exclude:
+      - write_todos         # internal task tracking — no user approval needed
+      - compact_conversation  # internal memory management — no user approval needed
+    # Applied when no policy below matches. 'ask' means an unrecognised
+    # tool is surfaced rather than run silently.
+    default_decision: ask
+    # First match wins, in order. Shell-style patterns, so a policy covers
+    # a family of tools without being rewritten per tool.
+    policies:
+      - tools: ["ls", "read_file", "glob", "grep"]
+        decision: allow
+        risk: low
+        reason: "Read-only inspection of the workspace"
+
+      # Delegation to a subagent defined in this agent's own config.
+      # It has no external effect of its own, and whatever the subagent
+      # then does is governed by these same policies — so gating it
+      # only buys a second prompt for the same decision.
+      #
+      # Left as `ask` it stops every multi-step answer mid-stream, and
+      # hangs unattended runs from channels and crons where nobody is
+      # there to approve.
+      - tools: ["task", "write_todos", "compact_conversation"]
+        decision: allow
+        risk: low
+        reason: "Internal planning and delegation; no external effect"
+
+      # ── MCP tools ────────────────────────────────────────────────
+      # Nothing covered MCP tools at all, so every one of them fell
+      # through to `default_decision: ask`. Any turn that actually
+      # used an integration stopped dead: the run ended `interrupted`
+      # with no answer, which reads as the agent hanging and was
+      # diagnosed as that more than once.
+      #
+      # Ordered before the destructive patterns below on purpose —
+      # first match wins, and an MCP tool named `delete_issue` must
+      # reach the destructive rule, not be caught by a blanket allow.
+      # Hence read verbs only here.
+      - tools:
+          - "mcp_list_resources"
+          - "mcp_list_resource_templates"
+          - "mcp_read_resource"
+        decision: allow
+        risk: low
+        reason: "Lists and reads MCP resource catalogues; no external effect"
+
+      # Read verbs on integration tools. These run against systems the
+      # user has already authenticated to, with the user's own token,
+      # and return data they can already see — asking permission to
+      # look something up on their behalf is a prompt with no decision
+      # in it, and it is what made multi-step answers unusable.
+      #
+      # This is a security boundary, so it is deliberately narrow:
+      # read verbs, nothing else. A tool whose name does not say it
+      # reads still asks. Widening this to `mcp_*` or `*` would let
+      # the agent act on external systems unprompted.
+      - tools:
+          - "get_*"
+          - "list_*"
+          - "search_*"
+          - "find_*"
+          - "fetch_*"
+          - "describe_*"
+        decision: allow
+        risk: low
+        reason: "Read-only lookup against an already-authorised system"
+
+      # Warehouse queries. Named for the verb `execute`, which reads
+      # as acting, but the Dataverse skill constrains it to `SELECT`
+      # and CTEs and the statement is run against data the user can
+      # already see. Asking per query made a full-org analysis a
+      # hundred identical prompts with no decision in any of them.
+      #
+      # Deliberately named, not pattern-matched: `execute_*` would
+      # also catch a tool that genuinely acts.
+      - tools: ["dataverse_execute_sql"]
+        decision: allow
+        risk: low
+        reason: "Read-only SELECT against an already-authorised warehouse"
+
+      - tools: ["delete_*", "drop_*", "remove_*", "truncate_*"]
+        decision: ask
+        risk: high
+        reason: "Destructive and usually irreversible"
+
+      - tools: ["execute"]
+        decision: ask
+        risk: high
+        reason: "Runs arbitrary commands in the agent sandbox"
+
+      # A schedule is the one tool whose effect lands when nobody is
+      # watching: every firing is a run this person did not ask for at
+      # the moment it happens.
+      - tools: ["schedule_task"]
+        decision: ask
+        risk: medium
+        reason: "Starts runs later, unattended, until cancelled"
+
+      # Background work is the same class with a shorter horizon: it
+      # keeps running after the person has gone, so it is theirs to
+      # agree to. Listing it is covered by the `list_*` rule above.
+      - tools: ["work_in_background"]
+        decision: ask
+        risk: medium
+        reason: "Keeps running after this conversation ends"
+
+      # Stopping one is the opposite, and it needs saying explicitly:
+      # nothing above matches `cancel_*`, so without this the platform
+      # default applies and the agent asks permission to stop
+      # something that is already running. That is the wrong way
+      # round. `list_scheduled_tasks` needs no entry — `list_*` above
+      # already allows it — and that asymmetry is exactly why this
+      # one was missed the first time.
+      - tools: ["cancel_scheduled_task"]
+        decision: allow
+        risk: low
+        reason: "Stops a schedule this person owns; undoing, not doing"
+
+      - tools: ["write_file", "edit_file"]
+        decision: ask
+        risk: medium
+        reason: "Modifies files in the workspace"
+  summarization_tool:
+    enabled: true
+  memory:
+    enabled: true
+    namespaces:
+      - "memories"
+  patch_tool_calls:
+    enabled: true
+  skills:
+    enabled: true
+  # --- Production guardrails ---
+  model_call_limit:
+    enabled: true
+    # A runaway guard, so it has to sit above the largest legitimate
+    # run. At roughly a model call per tool call plus planning, a 40
+    # query org walk needs more than 50, and hitting this limit ends
+    # the turn mid-analysis with whatever it had.
+    run_limit: 250
+  # Tools removed by product decision, not model capability.
+  #
+  # `create_chart_app` is deliberately absent: it is the MCP App,
+  # returning `structuredContent.figure` for the
+  # `ui://dataverse/chart-app.html` view. A chart widget cannot be
+  # expressed as a skill, and excluding it simply stopped MCP Apps
+  # appearing in chat.
+  #
+  # The four below went because what they knew was prompt knowledge,
+  # and it now lives in the `dataverse` skill where it can be read
+  # and corrected.
+  tool_exclusion:
+    enabled: true
+    tools:
+      - dataverse_identify_dataproducts
+      - dataverse_shortlist_tables
+      - dataverse_get_sql
+      - dataverse_search_dataversehelp
+
+  tool_call_limit:
+    enabled: true
+    run_limit: 200
+    # One model turn asking for the same tool ten times is a loop in
+    # any deployment — the run limit cannot see it, because each call
+    # is cheap and the run never technically gets stuck. Ten leaves
+    # room for legitimate breadth; five started refusing it.
+    per_block: 10
+    # A conversation that stays just under the run limit for twenty
+    # turns has spent more than any single run ever would. This is a
+    # runaway guard for that, not a budget: anything a person would
+    # actually hit in a day's work is set wrong.
+    per_thread: 2000
+    # Spent means the tool is withheld and the agent writes the answer
+    # from what it has. `error` loses the turn, which is the outcome
+    # the ceiling exists to prevent, not to cause.
+    on_exceeded: exclude
+    # Per-tool ceilings. The run limit above is a runaway guard and
+    # never fires; these are for the single tool that loops.
+    #
+    # `execute_sql` ran six times in one answer at ~15s each — the
+    # agent trying variation after variation of a query that was
+    # never going to answer the question, turning a 90s answer into
+    # 213s. Two is enough for one retry after an empty or failed
+    # result; past that the honest answer is that the data does not
+    # have it. The exhausted tool is blocked and the agent keeps
+    # running, so it answers with what it has.
+    per_tool:
+      # Four, not two.
+      #
+      # Two was right when `get_sql` wrote the statement: it arrived
+      # schema-validated, so a second run meant something unusual.
+      # That tool is excluded now and the model writes the SQL
+      # itself, with the warehouse error as its only feedback — so
+      # the first attempt failing is ordinary, not alarming. Four is
+      # one attempt plus the three corrections the skill allows;
+      # past that it is the same mistake rearranged.
+      #
+      # Raised to 40 for breadth, not for retries. That reasoning
+      # holds for one question answered by one query. A walk down a
+      # whole org is a legitimate query per manager per region, and
+      # four cut it off after the first two levels, which is how an
+      # answer comes back confidently shallow.
+      dataverse_execute_sql: 40
+  model_retry:
+    enabled: true
+    max_retries: 3
+    backoff_factor: 2.0
+    initial_delay: 1.0
+  model_fallback:
+    enabled: false
+    fallback_model: "google_genai:gemini-3.8-flash"
+    # Requires GOOGLE_API_KEY for Developer API, or matching Vertex AI config.
+    # Enable when fallback model uses same auth as primary.
+  tool_retry:
+    enabled: true
+    max_retries: 2
+    # Exact names only — no globbing — so every entry has to be a tool
+    # that actually exists, verified against a live `/mcp/<server>/
+    # inventory`. A name that is merely plausible retries nothing and
+    # looks configured.
+    #
+    # Scoped to read calls that cross the network to a provider and
+    # fail transiently. Nothing that writes is listed: retrying a write
+    # after an ambiguous failure is how one comment becomes three.
+    tools:
+      - semantic_search_tool      # atlan
+      - traverse_lineage_tool     # atlan
+      - get_merge_request_diffs   # gitlab
+      - list_commits              # gitlab
+      - canvas_read_as_svg        # miro
+  extra: []
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Async Tasks                                                    [YAML-loaded]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+async_tasks:
+  enabled: true
+  system_prompt: null
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Filesystem & Storage                                           [YAML-loaded]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Backend type: state | composite | store | local_shell
+#   state (default): Thread-scoped scratch. Recommended for production / OpenShift.
+#   composite: Routes paths to different backends (scratch + persistent memory).
+#   store: Cross-thread persistent storage via LangGraph Store.
+#   local_shell: Real filesystem with isolated venv. LOCAL DEV ONLY.
+#
+# OpenShift notes:
+#   - Runs as non-root with arbitrary UID (no guaranteed $HOME).
+#   - local_shell writes to /app/.cache (always writable).
+#   - For readOnlyRootFilesystem SCC, use state or composite with emptyDir volume.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Attachments                                                    [YAML-loaded]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Files a user can upload to a thread. They land in the agent's virtual
+# filesystem under mount_path, so read_file/grep/glob reach them without a
+# new tool — which means `filesystem.permissions` below also governs them.
+#
+# Every value is a refusal threshold. An allowlist, not a denylist: the set
+# of dangerous file types is open-ended and the set of useful ones is not.
+attachments:
+  enabled: true
+  max_file_bytes: 52428800      # 50 MB — a short video clip, not a feature film
+  max_thread_bytes: 209715200   # 200 MB cumulative, or a thread stops loading
+  max_files_per_request: 10
+  max_inline_chars: 20000       # beyond this the model reads the file, not the message
+  mount_path: "/uploads/"
+  # Audio and video above ~14 MB cannot be sent inline — Vertex reads
+  # them from Cloud Storage instead. Set MEDIA_BUCKET (env) to a bucket
+  # the agent's service account can write to, and add a lifecycle rule
+  # expiring the `agent-media/` prefix. Without it, large media is
+  # refused with an error that says so.
+  #   MEDIA_BUCKET: my-project-agent-media
+  # Empty means every format is accepted. Nothing uploaded is ever
+  # executed — text is extracted, binary is passed through as base64,
+  # and anything unrecognised is stored inert. List extensions here to
+  # restrict; everything else then gets a 415.
+  allowed_extensions: []
+
+# Which parser reads uploaded documents and indexed sources.
+#
+# `builtin` needs nothing: pypdf, python-docx, openpyxl and
+# python-pptx are already in the image. The alternatives are HTTP
+# clients for a service *you* run — this template never hosts one,
+# because a 2 GB image with a model cache to keep warm costs more than
+# the parse quality returns for most deployments.
+#
+# Point `url` at an existing Docling or Tika and it is used for the
+# formats below; everything else stays local. If it fails, the upload
+# still succeeds with the built-in parse, and the response says so.
+#   podman run -p 5001:5001 quay.io/docling-project/docling-serve
+extraction:
+  engine: builtin               # builtin | docling | tika
+  url: ""                       # e.g. http://docling:5001
+  api_key: ""
+  params: {}                    # passed to the engine verbatim
+  timeout_seconds: 120
+  max_bytes: 20971520           # 20 MB — above this, parse locally
+  fallback: true                # false makes the engine a hard dependency
+  # Only these are sent out. csv/json/md/txt/xlsx are omitted on
+  # purpose: they are parsed exactly right locally, and a round trip
+  # cannot improve on exactly right.
+  suffixes:
+    [pdf, docx, doc, pptx, ppt, odt, odp, rtf, epub, html, htm,
+     png, jpg, jpeg, tiff, tif, bmp, webp]
+
+# Usage analytics, at /analytics/*, for the same privileged LDAP roles
+# as /admin and /evals. Derived entirely from the `runs`, `thread` and
+# `message_feedback` tables — there is no event pipeline and no second
+# write path, so nothing here can disagree with what actually ran.
+#
+# No endpoint returns message text. Error strings are classified into
+# types rather than echoed, because an exception routinely carries the
+# input that caused it.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# What one person, and one team, may spend in a day     [YAML-loaded]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Absent means no cap, which is the right default: a budget that
+# appeared without anybody asking would refuse somebody mid-task on the
+# day of an upgrade.
+#
+# Two caps doing different jobs. The team cap is the bill — what a
+# group may run up in a day. On its own it is a shared pool, and a
+# shared pool is drained by whoever runs a script first, which is the
+# thing this prevents rather than a description of it.
+#
+# The per-person cap is the protection: it is what stops one person
+# reaching the team's ceiling on everybody else's behalf. Set that one
+# first. A team cap below it is refused, because the personal
+# allowance could then never be spent.
+#
+# Both are visible to the person they apply to, with a warning before
+# the refusal rather than with it.
+#
+# A monthly cap can be set beside either, or instead of it. The two
+# answer different questions: a day is the brake that stops one
+# runaway afternoon, a month is the budget somebody is accountable
+# for. Running out of a daily allowance costs an afternoon; running
+# out of a monthly one on the 22nd stops the team until the 1st, so
+# the month is projected from the burn rate and warned about while
+# there is still time to change something.
+#
+# A monthly cap below the daily one beside it is refused: the daily
+# allowance could then never be spent even once.
+#
+# limits:
+#   per_person:
+#     daily_spend: "5.00"    # in the rate card's currency
+#     monthly_spend: "100.00"
+#   per_team:
+#     daily_spend: "50.00"
+#     monthly_spend: "900.00"
+#     # Which teams the cap applies to. One number needs a list
+#     # of who it is for, and it is not the document corpus: a
+#     # team may have a budget and no documents, or the reverse.
+#     teams: [platform, sre]
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Documents that outlive a conversation                          [YAML-loaded]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# A document is reachable through a scope, and the scope is part of the
+# query — not a label applied to results afterwards. Three of them,
+# widening:
+#
+#   session  the thread it was attached to, and its participants
+#   user     one person's own material, across their conversations
+#   team     what a group shares, for the people in that group
+#   agent    the corpus this configuration curates, for everyone
+#
+# Team membership comes from the identity provider's groups and is
+# never a list kept here — a local member table is a second place
+# deciding who is in what, and the first time it disagrees with the
+# directory somebody keeps access they lost weeks ago.
+#
+# Turning one off here removes it from retrieval. There is no interface
+# for inventing a collection, because a taxonomy nothing queries is how
+# the last version of this went wrong.
+#
+# The agent corpus lives in the tree, at config/agent/knowledge/<name>/,
+# so it moves when the agent does.
+knowledge:
+  enabled: true
+  scopes:
+    session: true
+    user: true
+    team: true
+    agent: true
+  # The directory groups that have a team corpus. Candidates, never
+  # members: whether a reader is in one is asked of the identity
+  # provider on every request, so removing somebody there removes
+  # their access here. Empty means the team scope resolves to
+  # nothing — which is the honest answer, because without a group
+  # name there is nothing to ask the directory about.
+  teams: []
+  retrieval:
+    top_k: 8
+    min_score: 0.35
+    # Narrowest first: the scope closest to this conversation is the
+    # one most likely to be about it.
+    default_order: [session, user, team, agent]
+  limits:
+    # Small structured values the agent keeps between turns — a
+    # tally, a checklist, a tracker. Bounded because an unbounded
+    # store behind a model is an unbounded bill. Lowering only the
+    # total lowers the per-value cap with it.
+    artifact_max_bytes: 65536
+    artifact_value_max_bytes: 8192
+    user_max_bytes: 209715200
+    agent_max_bytes: 1073741824
+
+analytics:
+  # Attribute usage to named people at /analytics/users. Cost
+  # attribution is a real need, which is why this exists; "who talked
+  # to the assistant most this month" is also a management report
+  # nobody consented to, which is why it is off until someone decides
+  # otherwise. Aggregate figures are unaffected.
+  expose_users: false
+
+filesystem:
+  backend:
+    type: composite
+    local_shell:
+      timeout: 120
+      max_output_bytes: 100000
+    store:
+      enabled: true
+      scope: user
+    # Optional per-route directory override. A relative value is resolved
+    # inside the config tree ("/skills/" -> skills); an absolute one points
+    # elsewhere, and ${VAR} is expanded first.
+    # /data/ lives on its own volume rather than in the config tree, so it
+    # follows DATA_PATH and the same file works in a pod and locally. The
+    # extra "current" level exists because DATA_PATH is a mount point and
+    # cannot be renamed over; it stays invisible to the agent, which sees
+    # /data/<exactly what was uploaded>.
+    roots:
+      "/data/": "${DATA_PATH}/current"
+    routes:
+      "/skills/": filesystem_readonly
+      # Documents on a mounted volume, read-only. An explicit root
+      # because this is a PVC, not image content — resolving it under
+      # CONFIG_PATH would put a data tree inside the directory
+      # `_disk_signature` walks on every reload check.
+      #
+      # The agent reaches these with the filesystem tools it already
+      # has: `ls /documents/`, `glob`, `grep`, `read_file`. No new
+      # tool, so `permissions` below governs them like everything
+      # else.
+      "/documents/": filesystem_readonly:/app/data/documents
+      "/data/": filesystem_readonly
+      "/memories/": store
+      "/reports/": store
+      "/uploads/": state
+      "/": state
+  permissions:
+    - operations: [read, glob, grep, ls]
+      paths:
+        - "config/**"
+        - "docs/**"
+        - "reports/**"
+        - "skills/**"
+        - "uploads/**"
+        - "documents/**"
+        - "data/**"
+      mode: allow
+    - operations: [write, edit]
+      paths: ["reports/**", "memories/**"]
+      mode: allow
+    - operations: [write, edit]
+      paths: ["config/**", "documents/**", "*.py", "*.sh"]
+      mode: deny
+  permission_inheritance: false
+  settings:
+    tool_token_limit_before_evict: 20000
+    human_message_token_limit_before_evict: 50000
+    max_execute_timeout: 3600
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Cache                                                            [YAML-loaded]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+cache:
+  enabled: true
+  model:
+    enabled: true
+    ttl: 600
+    max_size: 50
+  personalization:
+    enabled: true
+    ttl: 120
+  mcp:
+    # MCP tool list cache — avoids reconnecting to every MCP server
+    # per request. Measured cold cost of a miss: 16-42 seconds, which
+    # the user waits through before their first token.
+    #
+    # 3600, not 300. The cache is keyed per user and held per pod, so
+    # a short TTL meant every user paid that cliff on their first
+    # turn, again after five minutes idle, and again on each pod they
+    # were routed to. At a thousand users that is also thousands of
+    # discovery sweeps against eight third-party services.
+    #
+    # A long TTL is safe here because staleness is already handled
+    # from both ends: an expired-but-present list is served
+    # immediately and refreshed in the background
+    # (see get_mcp_tools), and connecting or disconnecting a server
+    # invalidates the entry explicitly rather than waiting for
+    # expiry. Nothing depends on the TTL to notice a real change.
+    ttl: 3600
+  graph:
+    # 3600, for the same reason as the MCP list above, and measured
+    # the same way: a cold build is ~20s and the reader waits all of
+    # it before the run is even accepted. At 300 that cliff returned
+    # after five minutes idle, which is one think-and-type gap, so
+    # the common experience of the agent was the slow path.
+    #
+    # The key is a fingerprint of the model, prompt, tools, approval
+    # policy and user, so a config change makes a new entry rather
+    # than serving a stale graph. Nothing depends on this expiring.
+    #
+    # It is now per user as well, so a short TTL costs more than it
+    # used to: each person has their own entry to warm.
+    ttl: 3600
+  redis:
+    enabled: true
+  warming:
+    enabled: true
+  metrics:
+    enabled: true
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Memory Processing                                                  [env-var]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+memory:
+  consolidation:
+    enabled: true
+  decay:
+    enabled: true
+    lambda: 0.05
+  clustering:
+    enabled: true
+    threshold: 0.4
+    min_cluster_size: 3
+  relationships:
+    enabled: true
+  scheduler:
+    interval_hours: 6
+  max_inject: 20
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Guardrail                                                      [YAML-loaded]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Controls whether the Granite Guardian content safety checks are active.
+# Set enabled: false or remove this section entirely to disable guardrails.
+guardrail:
+  enabled: false
+  model: "/data/granite-guardian-4.1-8b"
+  # Credentials injected via env vars — configure in Agentforge platform UI:
+  #   GUARDIAN_API_BASE   — endpoint URL (required to activate guardrails)
+  #   GUARDIAN_API_KEY    — API key ("EMPTY" for unauthenticated endpoints)
+  #   GUARDIAN_SSL_VERIFY — true/false, default true
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Token Budget                                                   [YAML-loaded]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Tracks cumulative LLM tokens per conversation thread_id in MongoDB.
+token_budget:
+  enabled: true
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Observability                                                      [env-var]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Langfuse auto-activates when secrets are provided. No additional config needed.
+# OTEL traces export to Jaeger/Tempo/Collector via OTEL_EXPORTER_OTLP_ENDPOINT.
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Platform                                                           [env-var]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+platform:
+  audit:
+    enabled: false
+    buffer_max: 1000
+# Env: PLATFORM_AUDIT_ENABLED, PLATFORM_AUDIT_BUFFER_MAX
+# Org context: ORG
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# OPA (Authorization)                                                  [env-var]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+opa:
+  # Off here, on in the deployment that wants it — see
+  # OPA_ENABLED in deployment/overlays/kind/one-image-patch.yaml.
+  enabled: false
+  # localhost, because `harness all` runs the policy engine beside
+  # the agent from the same image — the binary is already in it and
+  # the policies are in this tree, under compliance/policies/. A
+  # service name here means the separate Deployment instead, which
+  # needs its own image and syncs policies from a git repo that is
+  # a second source of truth for these same files.
+  url: http://localhost:8181/v1/data/agent/authz
+  timeout: 2.0
+  max_retries: 3
+  fail_open: false
+# Env: OPA_ENABLED, OPA_URL, OPA_TIMEOUT, OPA_MAX_RETRIES
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Logging                                                            [env-var]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+logging:
+  level: INFO
+  request:
+    enabled: true
+    headers: true
+    body: true
+    body_max_size: 10240
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Server                                                             [env-var]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+server:
+  host: "0.0.0.0"
+  port: 5002
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Execution                                                      [YAML-loaded]
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# What a run is allowed to actually do.
+#
+#   live     normal operation
+#   dry_run  the agent may read and plan, but every tool that would pause
+#            for approval is refused instead. Use to preview what an agent
+#            would do before letting it loose.
+#
+# The other execution axes are Aegra's and are set per run, not here:
+#   trigger   HTTP run, cron job, or queue worker
+#   lifetime  `durability` (sync | async | exit), stateless runs
+#   surface   `stream_mode` (7 SSE modes), `on_disconnect`, `on_completion`
+execution:
+  effects: live

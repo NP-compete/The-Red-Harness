@@ -1,0 +1,102 @@
+"""Personalization cache — Redis L2 for user rules."""
+
+import asyncio
+import json
+from typing import Any
+
+from agent.src.cache import metrics
+from agent.src.cache.backend import RedisCache
+from agent.src.cache.config import cache_settings
+from agent.src.settings import settings
+from agent.utils.pylogger import get_python_logger
+
+logger = get_python_logger()
+
+_KEY_PREFIX = settings.PERSONALIZATION_KEY_PREFIX
+
+_redis: RedisCache | None = None
+
+
+def _get_redis() -> RedisCache:
+    global _redis  # noqa: PLW0603
+    if _redis is None:
+        _redis = RedisCache(
+            default_ttl=cache_settings.CACHE_PERSONALIZATION_TTL,
+            key_prefix=_KEY_PREFIX,
+        )
+    return _redis
+
+
+def _cache_key(user_id: str) -> str:
+    return f"user:{user_id}"
+
+
+async def get_rules(
+    user_id: str,
+) -> list[dict[str, Any]] | None:
+    """Return cached rules dicts or None on miss."""
+    if not cache_settings.is_enabled("personalization"):
+        return None
+
+    raw = await asyncio.to_thread(_get_redis().get, _cache_key(user_id))
+    if raw is None:
+        metrics.record_miss("personalization")
+        return None
+
+    try:
+        data = json.loads(raw)
+        metrics.record_hit("personalization")
+        logger.debug("Personalization cache HIT for user %s", user_id[:8])
+        return data["rules"]  # type: ignore[no-any-return]
+    except (json.JSONDecodeError, KeyError):
+        logger.debug(
+            "Personalization cache corrupt for user %s — evicting", user_id[:8]
+        )
+        await asyncio.to_thread(_get_redis().delete, _cache_key(user_id))
+        metrics.record_miss("personalization")
+        return None
+
+
+async def set_rules(
+    user_id: str,
+    rules: list[dict[str, Any]],
+) -> None:
+    """Store user rules in Redis cache."""
+    if not cache_settings.is_enabled("personalization"):
+        return
+
+    payload = json.dumps({"rules": rules})
+    await asyncio.to_thread(_get_redis().set, _cache_key(user_id), payload)
+    metrics.record_set("personalization")
+    logger.debug(
+        "Personalization cached for user %s (%d rules)",
+        user_id[:8],
+        len(rules),
+    )
+
+
+_FALLBACK_EXPIRE_SECONDS = settings.PERSONALIZATION_FALLBACK_EXPIRE_SECONDS
+
+
+async def invalidate(user_id: str | None = None) -> None:
+    """Evict cached personalization for a user."""
+    if user_id is None:
+        return
+    key = _cache_key(user_id)
+    redis = _get_redis()
+    if await asyncio.to_thread(redis.delete, key):
+        metrics.record_delete("personalization")
+        return
+    if await asyncio.to_thread(redis.expire, key, _FALLBACK_EXPIRE_SECONDS):
+        logger.warning(
+            "Cache delete failed, set %ds expiry for user %s",
+            _FALLBACK_EXPIRE_SECONDS,
+            user_id[:8],
+        )
+        metrics.record_delete("personalization")
+        return
+    logger.warning(
+        "Cache invalidation fully failed for user %s — "
+        "stale data may persist until TTL expiry",
+        user_id[:8],
+    )

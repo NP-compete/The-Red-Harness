@@ -1,0 +1,137 @@
+# The interface, for OpenShift (D-8, E10 strand B).
+#
+# **This did not exist in this repository.** Production's UI came
+# entirely from template-ui's own `deployment/` tree — a Deployment,
+# Service, Route, BuildConfig and ImageStream named `template-ui`.
+# Merging the repositories without bringing it across would have
+# deleted the production interface, which is the kind of thing a
+# repository merge does quietly.
+#
+# **No BuildConfig and no ImageStream.** Those built `template-ui`
+# as a second image, and there is one image now: the same artifact
+# the agent runs, asked for a different role by `args`. A second
+# build would reintroduce exactly the drift the single image was
+# adopted to prevent — a UI and an agent from different commits in
+# one deployment, with nothing to notice.
+#
+# **Two Deployments here, unlike Kind.** Kind runs `harness all` in
+# one container because a laptop should not pay for two pods.
+# Production keeps one role per container so a liveness probe, a
+# signal and the per-pod in-flight gauge each mean one thing.
+#
+# Unverified against a live OpenShift cluster: written from the
+# agent's own Deployment, Service and Route in this overlay and
+# from what template-ui's overlay provided. The image reference
+# resolves through the `images:` transformer like the agent's.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui
+  labels:
+    app: template-agent
+    component: ui
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      component: ui
+  template:
+    metadata:
+      labels:
+        app: template-agent
+        component: ui
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: ui
+          image: agent:latest
+          args: ["ui"]
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: agent-config
+          env:
+            - name: PORT
+              value: "8080"
+            # The agent's Service, not localhost: separate pods.
+            - name: AGENT_HOST
+              value: "http://agent:5002"
+            - name: UI_CONFIG_PATH
+              value: "/app/config/agent/runtime/ui.yaml"
+            # 32 characters minimum or the server refuses to start.
+            # From a Secret here, unlike Kind's literal: these
+            # cookies are real.
+            - name: COOKIE_SIGN
+              valueFrom:
+                secretKeyRef:
+                  name: agent-secrets
+                  key: COOKIE_SIGN
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  labels:
+    app: template-agent
+    component: ui
+spec:
+  selector:
+    component: ui
+  ports:
+    - port: 8080
+      targetPort: http
+      protocol: TCP
+      name: http
+  type: ClusterIP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: ui
+  annotations:
+    # The same idle timeout the agent's Route carries. The default
+    # is 30 seconds, and the interface holds an SSE connection open
+    # for the whole of a streamed answer — so without this the
+    # router cuts every reply that takes longer than half a minute,
+    # which reads as the agent hanging.
+    haproxy.router.openshift.io/timeout: 18000s
+  labels:
+    app: template-agent
+    component: ui
+spec:
+  to:
+    kind: Service
+    name: ui
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

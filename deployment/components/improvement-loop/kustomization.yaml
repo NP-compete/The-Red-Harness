@@ -1,0 +1,29 @@
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Opt-in: read this agent's own runs weekly and propose changes (E12-T7)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Not enabled by default, and not because it is expensive — it reads
+# conversations and writes a file. It is off because the proposals
+# are only useful where somebody has agreed to read them, and a
+# weekly job producing reviews nobody opens is noise with a cost.
+#
+# Enable by adding to an overlay's kustomization.yaml:
+#
+#   components:
+#     - ../../components/improvement-loop
+#
+# The job reads over the agent's public API and writes to its own
+# container filesystem. It cannot change configuration: the only
+# write route is `/config/edit`, which it never calls, and the
+# control check in `may_propose` refuses anything that would loosen
+# a control before a proposal is written at all.
+#
+# What it produces, in the job's log: an index of what it found and
+# one body per proposal, each carrying the observation, the
+# argument, how the change would have landed on the runs behind it,
+# links to those conversations, and the diff.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - cronjob.yaml

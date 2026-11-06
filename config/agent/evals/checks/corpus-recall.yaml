@@ -1,0 +1,9 @@
+name: corpus-recall
+kind: retrieval
+group: retrieval_quality
+corpus: agent
+decides: >
+  Blocks a change to chunking, scoring or thresholds: if the corpus
+  stops returning the documents these questions are about, the agent
+  answers from nothing and says so confidently.
+dataset: evals/datasets/corpus-recall.json

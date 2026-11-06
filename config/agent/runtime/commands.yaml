@@ -1,0 +1,40 @@
+# Commands this deployment adds, on top of the ones the agent ships.
+#
+# A command is a sentence somebody types often, written down once.
+# Typing `/` lists them, which is also the cheapest answer to "what
+# can this agent do" — the question documentation never answers at
+# the moment somebody has it.
+#
+# Each entry holds exactly three things:
+#
+#   name    one word, lower case, letters digits and hyphens
+#   help    one line, because the palette is a list of choices
+#   prompt  the sentence it stands for; `{about}` is where whatever
+#           was typed after the command goes
+#
+# Anything else is refused when the agent starts. A command has no
+# authority of its own: it expands to text the model reads exactly as
+# if the person had typed it, and that text goes through every check
+# an ordinary message does. It cannot approve a tool call, widen a
+# scope or lift a budget, and a name that suggests otherwise —
+# approve, allow, bypass, deny — is reserved.
+#
+# A name the agent already ships is refused too, so `/sources` keeps
+# meaning what the palette says it means everywhere.
+
+commands: []
+
+# commands:
+#   - name: handoff
+#     help: Write a handover for whoever picks this up
+#     prompt: >-
+#       Write a handover note for this conversation{about}: what was
+#       being attempted, what has been established, and what the next
+#       person should do first.
+#
+#   - name: retry-readonly
+#     help: Try the last step again without changing anything
+#     prompt: >-
+#       Attempt the previous step again{about}, reading only. Do not
+#       write, delete or send anything; report what you would have
+#       changed instead.

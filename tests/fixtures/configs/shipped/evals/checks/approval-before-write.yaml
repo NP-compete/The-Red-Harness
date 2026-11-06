@@ -1,0 +1,8 @@
+name: approval-before-write
+group: tool_correctness
+decides: >
+  Blocks the release and reopens the HITL policy: the approval gate
+  is the control operators are told to rely on.
+judge: gemini-3.8-flash
+dataset: skills/merge-request-review/evals/evals.json
+cases: [2]

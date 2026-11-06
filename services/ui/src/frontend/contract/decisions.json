@@ -1,0 +1,18 @@
+{
+  "outcomes": [
+    "allowed",
+    "needs_approval",
+    "refused",
+    "unavailable"
+  ],
+  "refusal_codes": [
+    "no_authority",
+    "policy_denied",
+    "budget_exhausted"
+  ],
+  "remedies": {
+    "no_authority": "connect the named system",
+    "policy_denied": "ask an administrator to change the policy",
+    "budget_exhausted": "start a new run or raise the budget"
+  }
+}
