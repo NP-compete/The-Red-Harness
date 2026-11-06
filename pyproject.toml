@@ -38,7 +38,7 @@ dependencies = [
     "langchain-google-vertexai==3.2.4",
     "langchain-openai==1.7.1",
     "langchain-mcp-adapters==0.3.2",
-    "mcp==1.30.0",
+    "mcp==2.3.0",
     "langfuse==4.17.0",
     "langgraph==1.2.14",
     "langgraph-checkpoint-postgres==3.1.2",
