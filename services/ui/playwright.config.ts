@@ -80,6 +80,9 @@ export default defineConfig({
       // and short enough that an unreachable one costs nothing.
       AGENT_TIMEOUT_MS: '1000',
       COOKIE_SIGN: 'playwright-test-secret-32-chars-min-length',
+      // See the file: the rate limiter is off, because the suite
+      // shares one bucket with itself and spends it.
+      UI_CONFIG_PATH: 'e2e/fixtures/settings.yaml',
     },
   },
 });
