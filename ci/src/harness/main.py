@@ -703,81 +703,47 @@ class Harness:
         with `for _ in $(seq 1 60)`. Dagger's service bindings do all
         three, and — unlike the runner's — they work on a laptop.
         """
-        agent = (
+        # The agent runs beside pytest in one container, not as a
+        # bound service. It was a service for two runs and both were
+        # cancelled at the job's sixty-minute wall: the service
+        # reported ready at 5m24s and then the whole pipeline went
+        # silent — no pytest output, no Dagger step, nothing, for
+        # fifty-one minutes. The same selection takes 101s in this
+        # container on a laptop, so it was never the tests, and with
+        # no output from either side there was nothing left to read.
+        #
+        # One container has no service graph to deadlock in, shows
+        # the agent's log when it will not start, and is what the
+        # old runner job did before any of this: start the agent,
+        # poll /health, run the tests.
+        start_and_test = (
+            "aegra dev --host 127.0.0.1 --port 5002 --no-db-check "
+            "--no-reload > /tmp/agent.log 2>&1 &\n"
+            "for i in $(seq 1 90); do "
+            "curl -sf -o /dev/null http://127.0.0.1:5002/health && break; "
+            "sleep 1; done\n"
+            "curl -sf -o /dev/null http://127.0.0.1:5002/health || { "
+            "echo 'the agent did not start; its log follows'; "
+            "tail -60 /tmp/agent.log; exit 1; }\n"
+            "echo '--- agent up, running the tier'\n"
+            "exec python -m pytest tests -m 'integration and not nightly' "
+            "-v --color=no --timeout=180 --timeout-method=thread "
+            "--durations=20\n"
+        )
+        out: str = await (
             self.datastores(self.base(source))
             # The agent refuses to start without this when any MCP
             # server stores tokens, which eight of them do. A fixed
             # value: these tests seal nothing anybody reads, and a
-            # generated one would make the container's cache key
-            # change on every run.
+            # generated one would change the cache key every run.
             .with_env_variable(
                 "MCP_TOKEN_ENCRYPTION_KEY",
                 "Zm9yLXRoZS1pbnRlZ3JhdGlvbi10aWVyLW9ubHktMzJiPQ==",
             )
-            .with_exposed_port(5002)
-            # `--host 0.0.0.0`, which is not the default. `aegra dev`
-            # binds 127.0.0.1, a service binding reaches the container
-            # from outside, and Dagger waits for the port forever — the
-            # first run of this sat at "3 steps running" for an hour
-            # and forty minutes with nothing to say.
-            #
-            # `--no-reload` because a file watcher in a container
-            # nobody is editing is a second process to signal.
-            .with_exec(
-                [
-                    "aegra",
-                    "dev",
-                    "--host",
-                    "0.0.0.0",
-                    "--port",
-                    "5002",
-                    "--no-db-check",
-                    "--no-reload",
-                ]
-            )
-            .as_service()
-        )
-        # The datastores are bound to the *agent*, not to this
-        # container. These tests talk to a running agent over HTTP and
-        # never to Postgres directly — and handing them a reachable
-        # one is actively harmful: `agent.aegra.shutdown` registers an
-        # atexit handler that closes the pool, and at interpreter
-        # shutdown that raises `RuntimeError: Event loop is closed`
-        # and pytest exits 3 having run every test successfully.
-        out: str = await (
-            self.base(source)
-            .with_service_binding("agent", agent)
-            .with_env_variable("LANGGRAPH_API_URL", "http://agent:5002")
-            .with_env_variable("AGENT_BASE_URL", "http://agent:5002")
-            # Unbuffered and one line per test, because this tier was
-            # cancelled twice at the job's timeout having printed
-            # nothing at all. The same selection takes 101s in this
-            # container on a laptop and 95s on the host, so whatever
-            # costs the other fifty minutes on a runner is not the
-            # tests — and silence is the reason that took three
-            # rounds to establish rather than one.
+            .with_env_variable("LANGGRAPH_API_URL", "http://127.0.0.1:5002")
+            .with_env_variable("AGENT_BASE_URL", "http://127.0.0.1:5002")
             .with_env_variable("PYTHONUNBUFFERED", "1")
-            .with_exec(
-                [
-                    "python",
-                    "-m",
-                    "pytest",
-                    "tests",
-                    "-m",
-                    "integration and not nightly",
-                    "-v",
-                    "--color=no",
-                    # A deadline, because a hung test here is
-                    # indistinguishable from a slow one from the
-                    # outside: this sat at "3 steps running" for an
-                    # hour and forty minutes the first time.
-                    "--timeout=180",
-                    "--timeout-method=thread",
-                    # Which of the ninety-one are the slow ones. They
-                    # have never run in CI before, so nobody knows.
-                    "--durations=20",
-                ]
-            )
+            .with_exec(["sh", "-c", start_and_test])
             .stdout()
         )
         return out

@@ -118,6 +118,8 @@ test.describe('Settings page', () => {
     const settings = new SettingsPage(page);
     await settings.goto();
     await settings.navigateBack();
-    await expect(page).toHaveURL('/');
+    // The home page is `/chat`; `/` redirects to it. See
+    // `SettingsPage.navigateBack`.
+    await expect(page).toHaveURL('/chat');
   });
 });

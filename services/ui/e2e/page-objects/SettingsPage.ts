@@ -76,6 +76,14 @@ export class SettingsPage {
   /** Navigate back to the home page via the back arrow button. */
   async navigateBack(): Promise<void> {
     await this.page.getByRole('button', { name: 'Back' }).click();
-    await expect(this.page).toHaveURL('/');
+    // `/chat`, not `/`. The button calls `navigate('/')` and
+    // `App.tsx` answers `/` with
+    // `<Navigate to="/chat" replace />`, so `/` is a URL the
+    // application passes through and never rests at. Asserting it
+    // was a race the slow machine won: on a laptop behind a podman
+    // VM the poll caught the instant before the redirect, and on a
+    // runner it never did — three attempts, three failures, and
+    // "expected /, received /chat" reading like a regression.
+    await expect(this.page).toHaveURL('/chat');
   }
 }
