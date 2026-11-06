@@ -260,9 +260,16 @@ class Harness:
         only way to reproduce one was to run the whole suite and
         read thirteen minutes of log.
         """
+        # `shlex.split`, not `str.split`. The first version broke
+        # `-m 'integration and not nightly'` into five tokens and
+        # pytest exited 4 — a usage error that looked like a 35-second
+        # test run, which is the worst thing a measuring instrument
+        # can do.
+        import shlex
+
         out: str = await (
             self.base(source)
-            .with_exec(["python", "-m", "pytest", *args.split()])
+            .with_exec(["python", "-m", "pytest", *shlex.split(args)])
             .stdout()
         )
         return out
@@ -742,6 +749,14 @@ class Harness:
             .with_service_binding("agent", agent)
             .with_env_variable("LANGGRAPH_API_URL", "http://agent:5002")
             .with_env_variable("AGENT_BASE_URL", "http://agent:5002")
+            # Unbuffered and one line per test, because this tier was
+            # cancelled twice at the job's timeout having printed
+            # nothing at all. The same selection takes 101s in this
+            # container on a laptop and 95s on the host, so whatever
+            # costs the other fifty minutes on a runner is not the
+            # tests — and silence is the reason that took three
+            # rounds to establish rather than one.
+            .with_env_variable("PYTHONUNBUFFERED", "1")
             .with_exec(
                 [
                     "python",
@@ -750,7 +765,8 @@ class Harness:
                     "tests",
                     "-m",
                     "integration and not nightly",
-                    "-q",
+                    "-v",
+                    "--color=no",
                     # A deadline, because a hung test here is
                     # indistinguishable from a slow one from the
                     # outside: this sat at "3 steps running" for an
