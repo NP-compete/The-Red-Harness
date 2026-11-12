@@ -25,7 +25,7 @@ ARG PYTHON_TAG=3.14.4-builder
 ARG PYTHON_RUNTIME_TAG=3.14.4-builder
 
 # ── the interface, built ────────────────────────────────────────
-FROM registry.access.redhat.com/hi/nodejs:24.18.0-builder AS ui
+FROM registry.access.redhat.com/hi/nodejs:26.13.1-builder AS ui
 
 WORKDIR /opt/app-root/src
 USER root
